@@ -13,6 +13,11 @@ list(APPEND CMAKE_MODULE_PATH
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts"
 )
 
+# Set MPI compilers before project declaration
+set(MPI_C_COMPILER "C:/msys64/clang64/bin/mpicc")
+set(MPI_CXX_COMPILER "C:/msys64/clang64/bin/mpicxx")
+set(MPI_Fortran_COMPILER "C:/msys64/clang64/bin/mpif90")
+
 project(metada
     VERSION 0.1.0
     LANGUAGES C CXX Fortran
@@ -26,7 +31,7 @@ metada_project_initialize()
 metada_find_package(GTest CONFIG)
 metada_find_package(Git)
 metada_find_package(ClangFormat)
-
+metada_find_package(MPI REQUIRED)
 
 # Find optional external dependencies
 metada_find_package(Lcov OPTIONAL QUIET)

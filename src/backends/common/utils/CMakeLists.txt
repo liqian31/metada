@@ -19,11 +19,15 @@ add_subdirectory(config)
 # Then build logger utilities that depend on config
 add_subdirectory(logger)
 
+# Build parallel adapter
+add_subdirectory(parallel)
+
 # Link both internal components to the public interface
 target_link_libraries(common_utils
     INTERFACE
         config_backend
         logger_backend
+        parallel_adapter
 )
 
 # Add a message showing what backends are used with configuration details
