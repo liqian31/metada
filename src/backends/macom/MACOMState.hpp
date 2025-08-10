@@ -610,14 +610,14 @@ MACOMState<ConfigBackend, GeometryBackend>::MACOMState(
     MACOMState<ConfigBackend, GeometryBackend>&& other) noexcept
     : config_(other.config_),
       geometry_(other.geometry_),
+      nlpb_(other.nlpb_),
+      nk_(other.nk_),
       inputFile_(std::move(other.inputFile_)),
       initialized_(other.initialized_),
       variables_(std::move(other.variables_)),
       dimensions_(std::move(other.dimensions_)),
       variableNames_(std::move(other.variableNames_)),
-      activeVariable_(std::move(other.activeVariable_)),
-      nlpb_(other.nlpb_),
-      nk_(other.nk_) {
+      activeVariable_(std::move(other.activeVariable_)) {
   other.initialized_ = false;
   other.variableNames_.clear();
   other.activeVariable_.clear();
