@@ -25,8 +25,7 @@ metada_project_initialize()
 #metada_find_package(Python3 COMPONENTS Development NumPy)
 metada_find_package(GTest CONFIG)
 metada_find_package(Git)
-metada_find_package(ClangFormat)
-metada_find_package(Fprettify)
+# metada_find_package(ClangFormat)
 metada_find_package(Eigen3 CONFIG)
 
 # Find optional external dependencies
@@ -34,7 +33,10 @@ metada_find_package(Lcov OPTIONAL QUIET)
 metada_find_package(yaml-cpp OPTIONAL CONFIG QUIET)
 metada_find_package(nlohmann_json OPTIONAL CONFIG QUIET)
 
-metada_find_package(ng-log OPTIONAL CONFIG QUIET)
+# Only find ng-log if not explicitly using CONSOLE backend
+if(NOT DEFINED LOGGER_BACKEND OR NOT LOGGER_BACKEND STREQUAL "CONSOLE")
+    metada_find_package(ng-log OPTIONAL CONFIG QUIET)
+endif()
 
 # Configure CUDA support
 include(CUDA)

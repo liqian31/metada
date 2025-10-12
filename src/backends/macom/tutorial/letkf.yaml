@@ -6,33 +6,75 @@ logger:
 
 # Geometry for the ensemble
 geometry:
-  file: "D:/macom/grid/nmefc_macom_reg_ll_grid_1d_vertical_cropped.nc"
+  file: "D:/macom/4var/4var-result/nmefc_macom_csp_grid_d01.nc"
 
-# Ensemble variables to analyze
+# Ensemble configuration - Choose one of three methods:
+# Method 1: Multiple state files
+# Method 2: Single ensemble file (MACOM format)  
+# Method 3: Perturbation generation
+
+# Method 1: Multiple state files (commented out)
+# ensemble:
+#   members:
+#     - state:
+#         file: "D:/macom/4var/emsemble/member1/MaCOM_daily_20200104_initial_d01.nc"
+#         timestamp: "2000-01-24_12:00:00Z"
+#         variables:
+#           - t
+#     - state:
+#         file: "D:/macom/4var/emsemble/member2/MaCOM_daily_20200104_initial_d01.nc"
+#         timestamp: "2000-01-24_12:00:00Z"
+#         variables:
+#           - t
+#     - state:
+#         file: "D:/macom/4var/emsemble/member3/MaCOM_daily_20200104_initial_d01.nc"
+#         timestamp: "2000-01-24_12:00:00Z"
+#         variables:
+#           - t
+#     - state:
+#         file: "D:/macom/4var/emsemble/member4/MaCOM_daily_20200104_initial_d01.nc"
+#         timestamp: "2000-01-24_12:00:00Z"
+#         variables:
+#           - t
+#     - state:
+#         file: "D:/macom/4var/emsemble/member5/MaCOM_daily_20200104_initial_d01.nc"
+#         timestamp: "2000-01-24_12:00:00Z"
+#         variables:
+#           - t
+
+# Method 2: Single ensemble file (MACOM format) - uncomment to use
 ensemble:
-  members:
-    - state:
-        file: "D:/macom/grid/nmefc_macom_initinal_1d_vertical_cropped.nc"
-        timestamp: "2000-01-24_12:00:00Z"
-        variables:
-          - t
-    - state:
-        file: "D:/macom/grid/nmefc_macom_initinal_1d_vertical_cropped.nc"
-        timestamp: "2000-01-24_12:00:00Z"
-        variables:
-          - t
+  single_file:
+    ensemble_file: "D:/macom/4var/X_MEMBER_HYCOM.DAT"
+    ensemble_size: 5
+    state_dimension: 74687333
+
+# # Method 3: Perturbation generation (new method) - uncomment to use
+# ensemble:
+#   perturbation_method:
+#     type: "gaussian"  # Options: "gaussian", "uniform"
+#     ensemble_size: 5
+#     std_dev: 0.1      # Standard deviation for Gaussian perturbation
+#     # amplitude: 0.1  # Amplitude for uniform perturbation (uncomment if using uniform)
+    
+#     # Initial state configuration for perturbation generation
+#     file: "D:/macom/4var/nmefc_macom_csp_initinal_d01_hycom_2020010400.nc"
+#     timestamp: "2000-01-24T12:00:00Z"
+#     variables:
+#       - "t"    # Temperature
+
 
 # Observation settings
 observations:
   types:
     - sea_surface_temp:
         if_use: true
-        file: "D:/macom/obs/sst_satellite_20240101.txt"
-        format: "geographic"  # lat lon level value error
+        file: "D:/macom/4var/4var-result/OBSERVATIONS_20200104.DAT"
+        format: "macom_obs"  # lat lon level time value error type
         variables:
           - temperature:
               if_use: true
-              error: 0.5
+              error: 0.01
               missing_value: -999.0
 
 # Observation operator settings
@@ -40,12 +82,12 @@ obs_operator:
   variables:
     - simple:
         if_use: true
-        error: 0.1  # standard deviations
+        error: 0.001  # standard deviations
 
 # Analysis settings
 analysis:
   algorithm: "letkf"
-  inflation: 1.0
-  localization_radius: 100.0
+  inflation: 2.0
+  localization_radius: 100.0  # 50 km (distance_to returns km for geographic coordinates)
   format: "nc"
-  output_base_file: "D:/macom/analysis" 
+  output_base_file: "D:/macom/analysis/letkf_analysis" 

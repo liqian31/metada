@@ -369,6 +369,9 @@ class MACOMGeometry {
   const std::vector<double>& getTe() const { return te_; }
   const std::vector<double>& getTn() const { return tn_; }
   const std::vector<double>& getTs() const { return ts_; }
+  const std::vector<double>& getMaskC() const { return maskC_; }
+  const std::vector<double>& getMaskW() const { return maskW_; }
+  const std::vector<double>& getMaskS() const { return maskS_; }
 
   template <typename StateBackend>
   void haloExchange([[maybe_unused]] StateBackend& state) {}
@@ -554,9 +557,9 @@ class MACOMGeometry {
   // std::vector<double> rAc_;    // Cell areas
   // std::vector<double> rAw_;    // Areas at west edges
   // std::vector<double> rAs_;    // Areas at south edges
-  // std::vector<double> maskC_;  // Land/sea mask at cell centers
-  // std::vector<double> maskW_;  // Land/sea mask at west edges
-  // std::vector<double> maskS_;  // Land/sea mask at south edges
+  std::vector<double> maskC_;  // Land/sea mask at cell centers
+  std::vector<double> maskW_;  // Land/sea mask at west edges
+  std::vector<double> maskS_;  // Land/sea mask at south edges
   // std::vector<double> hFacC_;  // Cell thickness factors
   // std::vector<double> hFacW_;  // West edge thickness factors
   // std::vector<double> hFacS_;  // South edge thickness factors
@@ -762,9 +765,9 @@ void MACOMGeometry<ConfigBackend>::loadGridArrays(netCDF::NcFile& ncFile) {
   // rAc_.resize(nlpb_);
   // rAw_.resize(nlpb_);
   // rAs_.resize(nlpb_);
-  // maskC_.resize(nlpb_ * nk_);
-  // maskW_.resize(nlpb_ * nk_);
-  // maskS_.resize(nlpb_ * nk_);
+  maskC_.resize(nlpb_ * nk_);
+  maskW_.resize(nlpb_ * nk_);
+  maskS_.resize(nlpb_ * nk_);
   // hFacC_.resize(nlpb_ * nk_);
   // hFacW_.resize(nlpb_ * nk_);
   // hFacS_.resize(nlpb_ * nk_);
@@ -806,9 +809,9 @@ void MACOMGeometry<ConfigBackend>::loadGridArrays(netCDF::NcFile& ncFile) {
   // readVar("rAc", rAc_);
   // readVar("rAw", rAw_);
   // readVar("rAs", rAs_);
-  // readVar("maskC", maskC_);
-  // readVar("maskW", maskW_);
-  // readVar("maskS", maskS_);
+  readVar("maskC", maskC_);
+  readVar("maskW", maskW_);
+  readVar("maskS", maskS_);
   // readVar("h0FacC", hFacC_);
   // readVar("h0FacW", hFacW_);
   // readVar("h0FacS", hFacS_);

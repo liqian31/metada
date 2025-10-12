@@ -174,14 +174,17 @@ class MACOMParallel {
    */
   int getCompProcs() const { return comp_procs_; }
 
+#if defined(SEAICE_ITD) && SEAICE_ITD
   /**
-   * @brief Initialize mitice components
+   * @brief Initialize mitice components (only available in global mode with sea
+   * ice)
    */
   void initializeMitice() {
     if (fortranInterface_) {
       fortranInterface_->initializeMitice();
     }
   }
+#endif
 
   /**
    * @brief Get the model configuration

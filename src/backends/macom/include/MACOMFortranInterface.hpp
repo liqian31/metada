@@ -7,36 +7,38 @@
 
 #pragma once
 
-// MACOM_MODE_ENABLED is defined by CMake
-#if MACOM_MODE_ENABLED
+#ifdef MPI_FOUND
 #include <mpi.h>
 #else
-// Define a dummy MPI_Comm type when MPI is not available
-typedef void* MPI_Comm;
-#define MPI_COMM_NULL nullptr
-#define MPI_COMM_WORLD nullptr
+// Define minimal MPI types when MPI is not available
+typedef int MPI_Comm;
+#define MPI_COMM_NULL 0
+#define MPI_COMM_WORLD 0
 #endif
 
 // Forward declare the C functions from the Fortran wrapper
 extern "C" {
-#if MACOM_MODE_ENABLED
 void c_macom_initialize_mpi(int comm_c);
 void c_macom_get_mpi_rank(int* rank);
 void c_macom_get_mpi_size(int* size);
 void c_macom_read_namelist();
-void c_macom_initialize_mitice();
 void c_get_macom_config_flags(bool* mitice, bool* restart, bool* assim,
                               int* init_iter, int* max_iter);
 void c_macom_finalize_mpi();
 void c_macom_mpi_send_info_comp_to_io();
 void c_macom_misc_run_info_open();
 void c_macom_init_csp();
-void c_macom_mitice_init_all();
 void c_macom_restart_and_assim();
 void c_macom_run_csp_step();
 void c_macom_csp_io_main();
+
+// Sea ice (mitice) functions
+void c_macom_initialize_mitice();
+void c_macom_mitice_init_all();
 void c_macom_finalize_mitice();
-#endif
+
+// 4D-Var DA main function
+void c_macom_4var_da_main();
 }
 
 namespace metada::backends::macom {
@@ -117,11 +119,6 @@ class MACOMFortranInterface {
                       int& max_iter);
 
   /**
-   * @brief Initialize mitice components (no-op for region mode)
-   */
-  void initializeMitice();
-
-  /**
    * @brief Finalizes the environment through Fortran.
    */
   void finalizeMPI();
@@ -142,11 +139,6 @@ class MACOMFortranInterface {
   void initCSP();
 
   /**
-   * @brief Initialize mitice components (no-op for region mode)
-   */
-  void miticeInitAll();
-
-  /**
    * @brief Handle restart and assimilation
    */
   void restartAndAssim();
@@ -162,9 +154,24 @@ class MACOMFortranInterface {
   void CspIoMain();
 
   /**
-   * @brief Finalize mitice components (for global mode)
+   * @brief Initialize mitice components
+   */
+  void initializeMitice();
+
+  /**
+   * @brief Initialize all mitice components
+   */
+  void miticeInitAll();
+
+  /**
+   * @brief Finalize mitice components
    */
   void finalizeMitice();
+
+  /**
+   * @brief Call Fortran 4D-Var DA main program
+   */
+  void run4VarDAMain();
 
  private:
   MPI_Comm mpi_comm_;  // C++ MPI communicator

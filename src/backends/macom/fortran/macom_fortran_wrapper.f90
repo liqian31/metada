@@ -4,6 +4,7 @@ module macom_fortran_wrapper
   ! Assuming your actual model logic is in other modules, e.g., mod_csp, mod_misc etc.
   ! You will need to add 'use' statements for any modules that these wrapper subroutines call.
   ! For example:
+  use mod_csp_basic
   use mod_misc
   use mod_csp
   use mod_csp_init
@@ -11,11 +12,10 @@ module macom_fortran_wrapper
   use mod_mpi_variables
   use mod_mpi_csp_io
   use mod_mpi_test
-  ! Conditionally include mitice modules based on compilation flags
+  ! Conditionally include mode-specific modules based on compilation flags
 
 #ifdef MACOM_REGION_MODE
   use mod_macom_final
-  use mod_csp_basic
 #endif
 
 #ifdef SEAICE_ITD

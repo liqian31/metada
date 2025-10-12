@@ -198,14 +198,18 @@ class LETKF {
     VectorXd yo_local(local_obs_dim);
     MatrixXd H_local(local_obs_dim, ens_size);
 
+    // Pre-compute observation operator for all ensemble members
+    // This avoids repeated computation in the inner loop
+    std::vector<std::vector<double>> ensemble_obs_data(ens_size);
+    for (int j = 0; j < ens_size; ++j) {
+      ensemble_obs_data[j] = obs_op_.apply(ensemble_.GetMember(j), obs_);
+    }
+
     for (int i = 0; i < local_obs_dim; ++i) {
       yo_local(i) = yo(local_obs_indices[i]);
-      // Use observation operator to apply H to each ensemble member
+      // Extract local observation values from pre-computed results
       for (int j = 0; j < ens_size; ++j) {
-        // Apply observation operator to get observation space values
-        const auto& obs_data = obs_op_.apply(ensemble_.GetMember(j), obs_);
-        // Extract the value for the specific observation location
-        H_local(i, j) = obs_data[local_obs_indices[i]];
+        H_local(i, j) = ensemble_obs_data[j][local_obs_indices[i]];
       }
     }
 
@@ -227,10 +231,37 @@ class LETKF {
     MatrixXd Pa_sqrt = Pa_local.llt().matrixL();
     MatrixXd Wa_local = std::sqrt(ens_size - 1) * Pa_sqrt;
 
-    // Update grid point
+    // Check if this grid point is a land point by checking the first ensemble
+    // member
+    auto [lat, lon, level] = grid_point.getGeographicCoords();
+    std::vector<double> query_lons = {lon};
+    std::vector<double> query_lats = {lat};
+    std::vector<double> query_depths = {level};
+
+    auto test_values =
+        ensemble_.GetMember(0).backend().getValuesAtNearestPoints(
+            query_lons, query_lats, query_depths, "t", true);
+
+    if (!test_values.empty() && (std::abs(test_values[0] + 99999.0) < 1e-10 ||
+                                 std::isnan(test_values[0]))) {
+      // This is a land point (either -99999.0 or NaN) - skip this grid point
+      // entirely
+      return;  // Skip this grid point
+    }
+
+    // Update grid point - use same method as observation operator
     VectorXd xb_local(ens_size);
     for (int i = 0; i < ens_size; ++i) {
-      xb_local(i) = ensemble_.GetMember(i).at(grid_point);
+      // Use getValuesAtNearestPoints like observation operator does
+      auto interpolated_values =
+          ensemble_.GetMember(i).backend().getValuesAtNearestPoints(
+              query_lons, query_lats, query_depths, "t", true);
+
+      if (!interpolated_values.empty()) {
+        xb_local(i) = interpolated_values[0];
+      } else {
+        xb_local(i) = 0.0;  // Fallback
+      }
     }
 
     VectorXd xb_mean_local = xb_local.mean() * VectorXd::Ones(ens_size);
@@ -241,11 +272,23 @@ class LETKF {
     MatrixXd Xa_pert_local = xb_pert_local.asDiagonal() * Wa_local;
     VectorXd xa_local = xa_mean_local + Xa_pert_local.rowwise().sum();
 
+    // Debug: Check LETKF update calculation
+
     for (int i = 0; i < ens_size; ++i) {
-      ensemble_.GetMember(i).at(grid_point) = xa_local(i);
+      // Use modifyValueAtLocation like observation operator does
+      auto [lat, lon, level] = grid_point.getGeographicCoords();
+      // Calculate the increment (difference between analysis and background)
+      double increment = xa_local(i) - xb_local(i);
+      if (lat > 27.3 && lat < 27.9 && lon > 120.5 && lon < 121.5) {
+        logger_.Info() << "Increment: " << increment << " at " << lat << ", "
+                       << lon << ", " << level;
+      }
+      ensemble_.GetMember(i).backend().modifyValueAtLocation(lat, lon, level,
+                                                             increment);
     }
   }
 
+ private:
   Ensemble<BackendTag>& ensemble_;
   Observation<BackendTag>& obs_;
   const ObsOperator<BackendTag>& obs_op_;

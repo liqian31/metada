@@ -277,6 +277,30 @@ class State : private NonCopyable {
     backend_.saveToFile(filename);
   }
 
+  // Background field operations (MACOM-specific)
+  /**
+   * @brief Extract background field XB from current state
+   * @details This is a MACOM-specific operation that extracts the background
+   * field from the state variables following the Fortran logic
+   */
+  void extractBackgroundField() { backend_.extractBackgroundField(); }
+
+  /**
+   * @brief Get background field XB
+   * @return Vector containing background field data
+   */
+  const std::vector<double>& getBackgroundField() const {
+    return backend_.getBackgroundField();
+  }
+
+  /**
+   * @brief Save background field to file for checking
+   * @param filename Output filename
+   */
+  void saveBackgroundFieldToFile(const std::string& filename) const {
+    backend_.saveBackgroundFieldToFile(filename);
+  }
+
   // Arithmetic operations
   /**
    * @brief Addition operator

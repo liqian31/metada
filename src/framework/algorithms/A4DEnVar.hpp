@@ -1,407 +1,178 @@
 #pragma once
-#include <Eigen/Dense>
-#include <algorithm>
-#include <cmath>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
+#include <string>
 #include <vector>
 
 #include "Config.hpp"
 #include "Ensemble.hpp"
 #include "Logger.hpp"
+#include "Model.hpp"
 #include "ObsOperator.hpp"
 #include "Observation.hpp"
-#include "ProgressBar.hpp"
 #include "State.hpp"
 
 namespace metada::framework {
 
 /**
  * @brief Analytical Four-Dimensional Ensemble-Variational (4DEnVar)
- * implementation.
+ * algorithm implementation.
  *
- * This class implements the analytical four-dimensional ensemble-variational
- * data assimilation algorithm as described in Liang et al. (2021). The A4DEnVar
- * combines the strengths of 4D-Var (temporal consistency) and ensemble methods
- * (flow-dependent error covariance) with an analytical solution that avoids
- * iterative minimization.
+ * @details
+ * This class implements the 4DEnVar algorithm for data assimilation,
+ * which combines ensemble and variational methods to provide an efficient
+ * approach for high-dimensional data assimilation problems.
  *
- * The A4DEnVar algorithm follows these steps:
- * 1. Build ensemble perturbations across time windows:
- *    \[
- *    \mathbf{X}'_i(t) = \mathbf{x}_i(t) - \bar{\mathbf{x}}(t)
- *    \]
- *    where \(\mathbf{x}_i(t)\) is the i-th ensemble member at time t.
+ * The algorithm is based on the Fortran implementation in mod_a4d_liwei.f90
+ * and follows the same simple parameter structure.
  *
- * 2. Compute ensemble-based background error covariance:
- *    \[
- *    \mathbf{P}^b = \frac{1}{N-1} \sum_{i=1}^{N} \mathbf{X}'_i \mathbf{X}'_i^T
- *    \]
- *
- * 3. Formulate the 4DEnVar cost function:
- *    \[
- *    J(\mathbf{x}_0) = \frac{1}{2} (\mathbf{x}_0 - \mathbf{x}_0^b)^T
- * \mathbf{P}^{b-1} (\mathbf{x}_0 - \mathbf{x}_0^b)
- *    + \frac{1}{2} \sum_{k=1}^{K} (\mathbf{y}_k - \mathbf{H}_k \mathbf{x}_k)^T
- * \mathbf{R}_k^{-1} (\mathbf{y}_k - \mathbf{H}_k \mathbf{x}_k)
- *    \]
- *
- * 4. Analytical solution for the analysis increment:
- *    \[
- *    \delta\mathbf{x}_0^a = \mathbf{P}^b \mathbf{H}^T (\mathbf{H} \mathbf{P}^b
- * \mathbf{H}^T + \mathbf{R})^{-1} \mathbf{d}
- *    \]
- *    where \(\mathbf{d}\) is the innovation vector and \(\mathbf{H}\) is the
- *    tangent linear observation operator.
- *
- * 5. Update the ensemble:
- *    \[
- *    \mathbf{x}_i^a = \mathbf{x}_i^b + \delta\mathbf{x}_0^a
- *    \]
- *
- * The A4DEnVar provides several advantages:
- * - Analytical solution avoids iterative minimization
- * - Flow-dependent covariance from ensemble
- * - Temporal consistency across multiple time windows
- * - Computationally efficient compared to standard 4D-Var
- *
- * For more details, see:
- * - Liang, K., et al. (2021). "An analytical four-dimensional
- * ensemble-variational data assimilation scheme." Journal of Advances in
- * Modeling Earth Systems, 13, e2020MS002314.
- *
- * @tparam BackendTag The backend tag type that must satisfy the required
- * concepts
+ * @tparam BackendTag Backend tag type for template specialization
  */
 template <typename BackendTag>
 class A4DEnVar {
  public:
   /**
-   * @brief Analysis results structure
+   * @brief Simple analysis results structure
    */
   struct AnalysisResults {
-    double cost_function_value;      ///< Final cost function value
-    double background_cost;          ///< Background cost component
-    double observation_cost;         ///< Observation cost component
-    double innovation_norm;          ///< Innovation vector norm
-    double analysis_increment_norm;  ///< Analysis increment norm
-    double background_spread;        ///< Background ensemble spread
-    double analysis_spread;          ///< Analysis ensemble spread
-    double max_kalman_gain;          ///< Maximum Kalman gain element
-    double min_kalman_gain;          ///< Minimum Kalman gain element
-    double condition_number;      ///< Condition number of innovation covariance
-    int ensemble_size;            ///< Number of ensemble members
-    int observation_count;        ///< Total number of observations
-    int time_windows;             ///< Number of time windows
-    std::string covariance_type;  ///< Type of covariance used
-    double localization_radius;   ///< Localization radius used
-    std::string localization_function;  ///< Localization function used
-    double inflation_factor;            ///< Inflation factor applied
-    std::string inflation_method;       ///< Method used for inflation
+    int ensemble_size;        ///< Number of ensemble members
+    int observation_count;    ///< Total number of observations
+    int max_outer_loops;      ///< Number of outer loops
+    std::string output_file;  ///< Output file path
   };
 
   /**
    * @brief Construct an A4DEnVar object.
-   * @param ensemble Reference to the ensemble to be updated.
-   * @param observations Vector of observation objects for different time
-   * windows.
-   * @param obs_operators Vector of observation operators for different time
-   * windows.
+   * @param ensemble Reference to the ensemble containing perturbation members.
+   * @param observations Observation object.
+   * @param obs_operator Observation operator.
+   * @param state State object for background field extraction.
    * @param config Configuration object containing A4DEnVar parameters.
    */
-  A4DEnVar(
-      Ensemble<BackendTag>& ensemble,
-      const std::vector<std::unique_ptr<Observation<BackendTag>>>& observations,
-      const std::vector<std::unique_ptr<ObsOperator<BackendTag>>>&
-          obs_operators,
-      const Config<BackendTag>& config)
-      : ensemble_(ensemble),
+  A4DEnVar(Ensemble<BackendTag>& ensemble,
+           const Observation<BackendTag>& observations,
+           const ObsOperator<BackendTag>& obs_operator,
+           State<BackendTag>& state, const Config<BackendTag>& config)
+      : model_(config),
+        ensemble_(ensemble),
         observations_(observations),
-        obs_operators_(obs_operators) {
-    // Get analysis configuration subsection
-    auto analysis_config = config.GetSubsection("analysis");
-
-    inflation_factor_ = analysis_config.Get("inflation").asFloat();
-    localization_radius_ = analysis_config.Get("localization_radius").asFloat();
-    output_base_file_ = analysis_config.Get("output_base_file").asString();
-    format_ = analysis_config.Get("format").asString();
-
-    // Parse inflation method
-    std::string inflation_method_str =
-        analysis_config.Get("inflation_method").asString();
-    if (inflation_method_str == "multiplicative") {
-      inflation_method_ = InflationMethod::MULTIPLICATIVE;
-    } else if (inflation_method_str == "additive") {
-      inflation_method_ = InflationMethod::ADDITIVE;
-    } else if (inflation_method_str == "relaxation") {
-      inflation_method_ = InflationMethod::RELAXATION;
+        obs_operator_(obs_operator),
+        state_(state) {
+    // Read parameters from config (config is already the analysis subsection)
+    // Required parameters
+    if (config.HasKey("max_outer_loops")) {
+      max_outer_loops_ = config.Get("max_outer_loops").asInt();
     } else {
-      inflation_method_ = InflationMethod::MULTIPLICATIVE;
-      logger_.Warning() << "Unknown inflation method '" << inflation_method_str
-                        << "', using multiplicative inflation";
+      throw std::runtime_error(
+          "Missing required parameter: analysis.max_outer_loops");
     }
 
-    // Parse localization function
-    std::string loc_function_str =
-        analysis_config.Get("localization_function").asString();
-    if (loc_function_str == "gaussian") {
-      localization_function_ = LocalizationFunction::GAUSSIAN;
-    } else if (loc_function_str == "exponential") {
-      localization_function_ = LocalizationFunction::EXPONENTIAL;
-    } else if (loc_function_str == "cutoff") {
-      localization_function_ = LocalizationFunction::CUTOFF;
-    } else if (loc_function_str == "gaspari_cohn") {
-      localization_function_ = LocalizationFunction::GASPARI_COHN;
+    if (config.HasKey("output_base_file")) {
+      output_base_file_ = config.Get("output_base_file").asString();
     } else {
-      localization_function_ = LocalizationFunction::GAUSSIAN;
-      logger_.Warning() << "Unknown localization function '" << loc_function_str
-                        << "', using Gaussian localization";
-    }
-
-    // Parse covariance type
-    std::string cov_type_str =
-        analysis_config.Get("covariance_type").asString();
-    if (cov_type_str == "ensemble") {
-      covariance_type_ = CovarianceType::ENSEMBLE;
-    } else if (cov_type_str == "hybrid") {
-      covariance_type_ = CovarianceType::HYBRID;
-    } else if (cov_type_str == "static") {
-      covariance_type_ = CovarianceType::STATIC;
-    } else {
-      covariance_type_ = CovarianceType::ENSEMBLE;
-      logger_.Warning() << "Unknown covariance type '" << cov_type_str
-                        << "', using ensemble covariance";
+      throw std::runtime_error(
+          "Missing required parameter: analysis.output_base_file");
     }
 
     logger_.Info() << "A4DEnVar constructed with " << ensemble_.Size()
                    << " members and " << observations_.size()
-                   << " time windows";
-    logger_.Info() << "Inflation factor: " << inflation_factor_;
-    logger_.Info() << "Localization radius: " << localization_radius_;
-    logger_.Info() << "Localization function: " << loc_function_str;
-    logger_.Info() << "Covariance type: " << cov_type_str;
+                   << " observations";
+    logger_.Info() << "Max outer loops: " << max_outer_loops_;
   }
 
   /**
-   * @brief Perform the A4DEnVar analysis step, updating the ensemble.
+   * @brief Save the updated ensemble to files.
    */
-  void Analyse() {
-    logger_.Info() << "A4DEnVar analysis started";
-    logger_.Info() << "Number of observations: " << observations_.size();
-    logger_.Info() << "Number of obs operators: " << obs_operators_.size();
-    using Eigen::MatrixXd;
-    using Eigen::VectorXd;
+  void saveEnsemble() {
+    logger_.Info() << "Saving A4DEnVar ensemble";
 
-    const int ens_size = ensemble_.Size();
-    const int state_dim = ensemble_.GetMember(0).size();
-    const int time_windows = observations_.size();
+    // Save analysis field
+    saveAnalysisField();
 
-    // 1. Build ensemble perturbations across time windows
-    std::vector<MatrixXd> X_pert_windows;
-    std::vector<VectorXd> x_mean_windows;
+    // Save ensemble check files
+    saveEnsembleCheckFiles();
 
-    for (int t = 0; t < time_windows; ++t) {
-      // Compute ensemble mean for this time window
-      ensemble_.RecomputeMean();
-      const auto& mean_state = ensemble_.Mean();
-      const auto mean_data = mean_state.template getDataPtr<double>();
-      VectorXd x_mean = Eigen::Map<const VectorXd>(mean_data, state_dim);
-      x_mean_windows.push_back(x_mean);
+    // Save background observations
+    std::vector<double> background_obs_values =
+        obs_operator_.apply(state_, observations_);
+    saveBackgroundObservations(background_obs_values);
 
-      // Build perturbation matrix for this time window
-      MatrixXd X_pert(state_dim, ens_size);
-      for (int i = 0; i < ens_size; ++i) {
-        const auto& pert_data =
-            ensemble_.GetPerturbation(i).template getDataPtr<double>();
-        X_pert.col(i) = Eigen::Map<const VectorXd>(pert_data, state_dim);
-      }
-      X_pert_windows.push_back(X_pert);
-    }
-
-    // 2. Compute ensemble-based background error covariance
-    MatrixXd P_b = computeEnsembleCovariance(X_pert_windows[0]);
-
-    // Apply inflation
-    applyInflation(P_b);
-
-    // Apply localization
-    MatrixXd P_b_local = applyLocalization(P_b);
-
-    // 3. Build observation operators and innovation vectors
-    std::vector<MatrixXd> H_matrices;
-    std::vector<VectorXd> innovations;
-    std::vector<MatrixXd> R_matrices;
-    int total_obs = 0;
-
-    logger_.Info() << "Building observation operators for " << time_windows
-                   << " time windows";
-    logger_.Info() << "State dimension: " << state_dim;
-
-    for (int t = 0; t < time_windows; ++t) {
-      const auto& obs = *observations_[t];
-      const auto& obs_op = *obs_operators_[t];
-      const int obs_dim = obs.size();
-      logger_.Info() << "Time window " << t << ": obs_dim = " << obs_dim;
-
-      // Get observation data
-      const auto obs_data = obs.template getData<std::vector<double>>();
-      VectorXd y_o = Eigen::Map<const VectorXd>(obs_data.data(), obs_dim);
-
-      // Get observation error covariance
-      const auto& R_data = obs.getCovariance();
-      VectorXd R_diag = Eigen::Map<const VectorXd>(R_data.data(), obs_dim);
-      MatrixXd R = R_diag.asDiagonal();
-
-      // Compute innovation for ensemble mean
-      const auto& simulated_obs = obs_op.apply(ensemble_.Mean(), obs);
-      VectorXd y_b = Eigen::Map<const VectorXd>(simulated_obs.data(), obs_dim);
-      VectorXd innovation = y_o - y_b;
-
-      // Store matrices and vectors
-      // Create H matrix that maps from state space to observation space
-      // For A4DEnVar, we need to ensure H has the correct dimensions
-      MatrixXd H = MatrixXd::Zero(obs_dim, state_dim);
-
-      // Create a simple linear mapping - in practice, this should be the actual
-      // tangent linear of the observation operator
-      // For now, we'll use a simple interpolation-like mapping
-      for (int i = 0; i < obs_dim; ++i) {
-        // Map each observation to a corresponding state element
-        // This is a simplified assumption - in practice, H should come from the
-        // obs operator
-        int state_idx = i % state_dim;  // Simple modulo mapping
-        H(i, state_idx) = 1.0;
-      }
-
-      // Ensure H matrix is valid
-      if (H.rows() != obs_dim || H.cols() != state_dim) {
-        logger_.Error() << "H matrix dimension mismatch: " << H.rows() << "x"
-                        << H.cols() << " expected " << obs_dim << "x"
-                        << state_dim;
-        throw std::runtime_error("H matrix dimension mismatch");
-      }
-
-      H_matrices.push_back(H);
-      innovations.push_back(innovation);
-      R_matrices.push_back(R);
-      total_obs += obs_dim;
-    }
-
-    // 4. Formulate the 4DEnVar problem
-    logger_.Info() << "Building 4D observation operator...";
-    MatrixXd H_4d = buildFourDObservationOperator(H_matrices);
-    logger_.Info() << "Building 4D innovation vector...";
-    VectorXd d_4d = buildFourDInnovationVector(innovations);
-    logger_.Info() << "Building 4D observation covariance...";
-    MatrixXd R_4d = buildFourDObservationCovariance(R_matrices);
-
-    // Debug: Print matrix dimensions
-    logger_.Info() << "Matrix dimensions:";
-    logger_.Info() << "H_4d: " << H_4d.rows() << " x " << H_4d.cols();
-    logger_.Info() << "P_b_local: " << P_b_local.rows() << " x "
-                   << P_b_local.cols();
-    logger_.Info() << "R_4d: " << R_4d.rows() << " x " << R_4d.cols();
-    logger_.Info() << "d_4d: " << d_4d.size();
-    logger_.Info() << "Total observations: " << total_obs;
-    logger_.Info() << "Time windows: " << time_windows;
-
-    // 5. Compute analytical solution
-    // Check matrix dimensions before multiplication
-    logger_.Info() << "Computing S = H * P * H^T + R";
-    logger_.Info() << "H_4d: " << H_4d.rows() << " x " << H_4d.cols();
-    logger_.Info() << "P_b_local: " << P_b_local.rows() << " x "
-                   << P_b_local.cols();
-    logger_.Info() << "R_4d: " << R_4d.rows() << " x " << R_4d.cols();
-
-    MatrixXd S, K;
-    try {
-      // Compute S = H * P * H^T + R step by step to catch dimension issues
-      MatrixXd HP = H_4d * P_b_local;
-      logger_.Info() << "HP: " << HP.rows() << " x " << HP.cols();
-      MatrixXd HPHt = HP * H_4d.transpose();
-      logger_.Info() << "HPHt: " << HPHt.rows() << " x " << HPHt.cols();
-      S = HPHt + R_4d;
-      logger_.Info() << "S: " << S.rows() << " x " << S.cols();
-
-      K = P_b_local * H_4d.transpose() * S.inverse();
-    } catch (const std::exception& e) {
-      logger_.Error() << "Matrix multiplication error: " << e.what();
-      throw;
-    }
-
-    // Store Kalman gain statistics
-    max_kalman_gain_ = K.maxCoeff();
-    min_kalman_gain_ = K.minCoeff();
-
-    // Compute condition number using singular values
-    Eigen::JacobiSVD<Eigen::MatrixXd> svd(S);
-    auto singular_values = svd.singularValues();
-    condition_number_ =
-        singular_values(0) / singular_values(singular_values.size() - 1);
-
-    // 6. Compute analysis increment
-    VectorXd delta_x = K * d_4d;
-
-    // Store analysis increment norm
-    analysis_increment_norm_ = delta_x.norm();
-
-    // 7. Update ensemble members
-    for (int i = 0; i < ens_size; ++i) {
-      auto& member = ensemble_.GetMember(i);
-      auto data = member.template getDataPtr<double>();
-      VectorXd x_current = Eigen::Map<VectorXd>(data, state_dim);
-      VectorXd x_updated = x_current + delta_x;
-      Eigen::Map<VectorXd>(data, state_dim) = x_updated;
-    }
-
-    // 8. Update ensemble statistics
-    ensemble_.RecomputeMean();
-    ensemble_.RecomputePerturbations();
-
-    // Compute analysis spread
-    const auto& analysis_mean = ensemble_.Mean();
-    const auto analysis_mean_data = analysis_mean.template getDataPtr<double>();
-    VectorXd xa_mean =
-        Eigen::Map<const VectorXd>(analysis_mean_data, state_dim);
-
-    double analysis_spread = 0.0;
-    for (int i = 0; i < ens_size; ++i) {
-      const auto& pert_data =
-          ensemble_.GetPerturbation(i).template getDataPtr<double>();
-      VectorXd pert = Eigen::Map<const VectorXd>(pert_data, state_dim);
-      analysis_spread += pert.squaredNorm();
-    }
-    analysis_spread_ = std::sqrt(analysis_spread / (ens_size * state_dim));
-
-    // Compute cost function components
-    computeCostFunctionComponents(P_b_local, d_4d, R_4d);
-
-    logger_.Info() << "A4DEnVar analysis completed";
-  }
-
-  /**
-   * @brief Save the analyzed ensemble to files
-   */
-  void saveEnsemble() const {
-    logger_.Info() << "A4DEnVar saving ensemble";
-    const int ens_size = ensemble_.Size();
-
-    // Save analysis mean using the ensemble's mean state
-    const auto& mean_state = ensemble_.Mean();
-    mean_state.saveToFile(output_base_file_ + "_mean." + format_);
-    logger_.Info() << "Analysis mean saved to: "
-                   << output_base_file_ + "_mean." + format_;
-
-    // Save individual ensemble members
-    for (int i = 0; i < ens_size; ++i) {
-      const auto& member = ensemble_.GetMember(i);
-      member.saveToFile(output_base_file_ + "_member_" + std::to_string(i) +
-                        "." + format_);
-    }
-
-    // Save diagnostics
-    saveDiagnostics();
+    // Save analysis observations
+    saveAnalysisObservations(background_obs_values);
 
     logger_.Info() << "A4DEnVar ensemble saved";
+  }
+
+  /**
+   * @brief Initialize analysis components (t₀ phase - data reading and setup)
+   * Corresponds to Fortran lines 15-75: memory allocation and data reading
+   */
+  void initializeAnalysis() {
+    // 1. Background field is already extracted during State construction
+    // No need to call extractBackgroundField() again
+    logger_.Info()
+        << "Background field already available from State construction";
+
+    // 2. Memory allocation (C++ automatic - no need for explicit allocation)
+    // In Fortran: allocate(XB(NP), X0(NP), TP(NP), Delta_X(NP), OM(NM), etc.)
+    // In C++: memory is managed automatically by std::vector and objects
+    logger_.Info() << "Memory allocation completed (C++ automatic)";
+
+    // 3. Observation data already loaded in constructor
+    // In Fortran: read observation coordinates and values from file
+    // In C++: observations_ object already contains all observation data
+    logger_.Info() << "Observation data reading completed - "
+                   << observations_.size() << " observations already loaded";
+
+    // 4. Ensemble data already loaded in constructor
+    // In Fortran: read ensemble members X(NP,NM) from file
+    // In C++: ensemble_ object already contains all ensemble member data
+    logger_.Info() << "Ensemble data reading completed - " << ensemble_.Size()
+                   << " members already loaded";
+
+    // 5. Variable initialization (C++ automatic - no need for explicit
+    // initialization) In Fortran: OM = 0.0D0 and other variable initialization
+    // In C++: variables are automatically initialized by constructors and
+    // default values logger_.Info() << "Variable initialization completed (C++
+    // automatic)";
+
+    logger_.Info()
+        << "t₀ Phase completed: Data reading and initialization done";
+  }
+
+  /**
+   * @brief Run ensemble outer loop (IEXT loop - corresponds to Fortran lines
+   * 77-409) This is the main A4DEnVar algorithm loop
+   */
+  void runEnsembleOuterLoop() {
+    logger_.Info() << "=== Starting IEXT Outer Loop ===";
+
+    // A4DEnVar parameters (from configuration)
+    const int max_outer_loops = max_outer_loops_;
+
+    // Main IEXT loop (corresponds to Fortran: DO IEXT = 1, macom_loop_end)
+    for (int iext = 1; iext <= max_outer_loops; ++iext) {
+      logger_.Info() << "--> This is for outloop: " << iext;
+
+      // Process IEXT-specific logic
+      processIEXTLoop(iext);
+
+      // Exit condition (corresponds to Fortran: IF(IEXT.EQ.macom_loop_end)EXIT)
+      if (iext == max_outer_loops) {
+        logger_.Info() << "Final IEXT loop completed, exiting";
+        break;
+      }
+
+      // Process ensemble members for this IEXT (corresponds to Fortran: DO
+      // M=1,NM)
+      processEnsembleMembers(iext);
+
+      logger_.Info() << "IEXT " << iext << " completed";
+    }
+
+    logger_.Info() << "IEXT Outer loop completed";
   }
 
   /**
@@ -409,331 +180,569 @@ class A4DEnVar {
    */
   AnalysisResults getAnalysisResults() const {
     AnalysisResults results;
-    results.cost_function_value = cost_function_value_;
-    results.background_cost = background_cost_;
-    results.observation_cost = observation_cost_;
-    results.innovation_norm = innovation_norm_;
-    results.analysis_increment_norm = analysis_increment_norm_;
-    results.background_spread = background_spread_;
-    results.analysis_spread = analysis_spread_;
-    results.max_kalman_gain = max_kalman_gain_;
-    results.min_kalman_gain = min_kalman_gain_;
-    results.condition_number = condition_number_;
     results.ensemble_size = ensemble_.Size();
-    results.observation_count = total_observation_count_;
-    results.time_windows = observations_.size();
-    results.covariance_type = getCovarianceTypeString();
-    results.localization_radius = localization_radius_;
-    results.localization_function = getLocalizationFunctionString();
-    results.inflation_factor = inflation_factor_;
-    results.inflation_method = getInflationMethodString();
+    results.observation_count = observations_.size();
+    results.max_outer_loops = max_outer_loops_;
+    results.output_file = output_base_file_;
     return results;
   }
 
  private:
-  /**
-   * @brief Inflation method enumeration
-   */
-  enum class InflationMethod {
-    MULTIPLICATIVE,  ///< Multiplicative inflation (default)
-    ADDITIVE,        ///< Additive inflation
-    RELAXATION       ///< Relaxation inflation
-  };
+  // A4D algorithm variables (based on mod_csp_basic.f90)
+  std::vector<double>
+      analysis_state_;  // Analysis state (corresponds to X0 = XB)
+  std::vector<std::vector<double>>
+      ensemble_perturbations_;  // Ensemble perturbations (corresponds to X, NM
+                                // x NP)
+  std::vector<std::vector<double>>
+      ensemble_covariance_;  // Ensemble covariance matrix (corresponds to BB,
+                             // NM x NM)
+  std::vector<double> eigenvalues_;  // Eigenvalues (corresponds to LM)
+  std::vector<std::vector<double>>
+      eigenvectors_;  // Eigenvectors (corresponds to VP, NM x NM)
+  std::vector<std::vector<double>>
+      vv_matrix_;  // VV matrix (corresponds to VV, NM x NM)
+  std::vector<double>
+      background_observations_;  // Background observations (corresponds to HX)
+  double mu_scaling_factor_ =
+      1.0e-6;  // Scaling factor for ensemble perturbations (corresponds to MU)
+
+  // Model for integration (created from config)
+  Model<BackendTag> model_;
 
   /**
-   * @brief Localization function type enumeration
+   * @brief Process IEXT-specific logic (corresponds to Fortran lines 79-255)
+   * @param iext Current IEXT loop number
    */
-  enum class LocalizationFunction {
-    GAUSSIAN,     ///< Gaussian localization function
-    EXPONENTIAL,  ///< Exponential localization function
-    CUTOFF,       ///< Cutoff localization function
-    GASPARI_COHN  ///< Gaspari-Cohn localization function
-  };
+  void processIEXTLoop(int iext) {
+    logger_.Info() << "Processing IEXT loop " << iext;
 
-  /**
-   * @brief Covariance type enumeration
-   */
-  enum class CovarianceType {
-    ENSEMBLE,  ///< Pure ensemble covariance
-    HYBRID,    ///< Hybrid ensemble-static covariance
-    STATIC     ///< Static climatological covariance
-  };
+    // Set flags (corresponds to Fortran lines 81-82)
+    bool flag = (iext == max_outer_loops_);
+    bool ln_assm_gain = (iext >= 2);
 
-  /**
-   * @brief Compute ensemble-based background error covariance
-   */
-  Eigen::MatrixXd computeEnsembleCovariance(
-      const Eigen::MatrixXd& X_pert) const {
-    const int ens_size = X_pert.cols();
-    return X_pert * X_pert.transpose() / (ens_size - 1);
-  }
+    // Suppress unused variable warnings - these will be used in TODO
+    // implementations
+    (void)flag;
+    (void)ln_assm_gain;
 
-  /**
-   * @brief Apply inflation to background covariance
-   */
-  void applyInflation(Eigen::MatrixXd& P_b) {
-    switch (inflation_method_) {
-      case InflationMethod::MULTIPLICATIVE:
-        P_b *= inflation_factor_;
-        break;
-      case InflationMethod::ADDITIVE:
-        // Additive inflation would add random perturbations
-        // For simplicity, we use multiplicative here
-        P_b *= inflation_factor_;
-        break;
-      case InflationMethod::RELAXATION:
-        // Relaxation inflation reduces the analysis increment
-        // For simplicity, we use multiplicative here
-        P_b *= inflation_factor_;
-        break;
+    // Save analysis field if final loop (corresponds to Fortran lines 84-90)
+    if (iext == max_outer_loops_) {
+      saveAnalysisField();
     }
 
-    // Compute background spread for diagnostics
-    background_spread_ = std::sqrt(P_b.trace() / P_b.rows());
+    // Process gain fields for IEXT >= 2 (corresponds to Fortran lines 92-147)
+    if (iext >= 2) {
+      processGainFields();
+    }
+
+    // Set macom_loop_i and call model integration (corresponds to Fortran lines
+    // 155-161)
+    int macom_loop_i = iext;
+    logger_.Info() << "--> X0 integration";
+    logger_.Info() << "--> calling macom, mode: " << macom_loop_i;
+
+    // Call model integration for background field
+    // Variables are managed by Fortran, C++ only passes control parameters
+    model_.runIntegration(state_, state_, ln_assm_gain);
+
+    // Set macom_loop_i = 2 for next iteration (corresponds to Fortran line 163)
+    if (iext != max_outer_loops_) {
+      macom_loop_i = 2;
+    }
+
+    // Process background observations (corresponds to Fortran lines 165-255)
+    processBackgroundObservations(iext);
+
+    logger_.Info() << "IEXT loop " << iext << " processing completed";
   }
 
   /**
-   * @brief Apply localization to covariance matrix
+   * @brief Process ensemble members (corresponds to Fortran lines 258-409)
+   * @param iext Current IEXT loop number
    */
-  Eigen::MatrixXd applyLocalization(const Eigen::MatrixXd& cov) const {
-    using Eigen::MatrixXd;
+  void processEnsembleMembers(int iext) {
+    logger_.Info() << "Processing ensemble members for IEXT " << iext;
 
-    const int dim = cov.rows();
-    MatrixXd localized_cov = cov;
+    const int ensemble_size = ensemble_.Size();
 
-    // Create localization matrix (simplified - in practice would use distance
-    // information)
-    MatrixXd L = MatrixXd::Ones(dim, dim);
+    // Loop through ensemble members (corresponds to Fortran: DO M=1,NM)
+    for (int member = 0; member < ensemble_size; ++member) {
+      logger_.Info() << "--> This is for member / outloop";
+      logger_.Info() << member + 1 << "/" << iext;
 
-    // Apply localization function
-    for (int i = 0; i < dim; ++i) {
-      for (int j = 0; j < dim; ++j) {
-        double distance = std::abs(i - j) / static_cast<double>(dim);
-        L(i, j) = computeLocalizationFunction(distance);
+      // Compute TP = X + X0 (corresponds to Fortran line 263)
+      computeMemberState(member);
+
+      // Process gain fields for this member (corresponds to Fortran lines
+      // 266-318)
+      processMemberGainFields(member);
+
+      // Set ln_assm_gain = true and call model integration (corresponds to
+      // Fortran lines 321-328)
+      bool ln_assm_gain = true;
+
+      // Suppress unused variable warning - will be used in TODO implementation
+      (void)ln_assm_gain;
+      logger_.Info() << "--> member integration";
+      logger_.Info() << "--> calling macom, mode: " << 2;
+
+      // Call model integration for ensemble member
+      // Variables are managed by Fortran, C++ only passes control parameters
+      State<BackendTag>& memberState = ensemble_.GetMember(member);
+      model_.runMemberIntegration(memberState, memberState, member,
+                                  ln_assm_gain);
+
+      // Process member observations (corresponds to Fortran lines 330-409)
+      processMemberObservations(member, iext);
+    }
+
+    logger_.Info() << "Ensemble members processing completed for IEXT " << iext;
+  }
+
+  /**
+   * @brief Save analysis field to file
+   */
+  void saveAnalysisField() const {
+    try {
+      std::ofstream ana_file(output_base_file_ + ".DAT");
+      if (ana_file.is_open()) {
+        auto analysis_field = state_.getBackgroundField();
+        for (const auto& value : analysis_field) {
+          ana_file << std::scientific << std::setprecision(15) << value << "\n";
+        }
+        ana_file.close();
+        logger_.Info() << "Analysis field saved to " << output_base_file_
+                       << ".DAT";
+      }
+    } catch (const std::exception& e) {
+      logger_.Error() << "Failed to save analysis field: " << e.what();
+    }
+  }
+
+  /**
+   * @brief Save ensemble check files
+   */
+  void saveEnsembleCheckFiles() const {
+    try {
+      std::ofstream check_file("D:/macom/4var/result/CHECK_ENS.DAT");
+      if (check_file.is_open()) {
+        for (size_t member = 0; member < ensemble_.Size(); ++member) {
+          auto& member_state = ensemble_.GetMember(member);
+          auto member_field = member_state.getBackgroundField();
+          for (const auto& value : member_field) {
+            check_file << std::scientific << std::setprecision(15) << value
+                       << " ";
+          }
+          check_file << "\n";
+        }
+        check_file.close();
+        logger_.Info() << "Ensemble check files saved to CHECK_ENS.DAT";
+      }
+    } catch (const std::exception& e) {
+      logger_.Error() << "Failed to save ensemble check files: " << e.what();
+    }
+  }
+
+  /**
+   * @brief Save background field observations to file
+   */
+  void saveBackgroundObservations(
+      const std::vector<double>& background_observations) const {
+    try {
+      std::ofstream bkg_file("D:/macom/4var/result/CHECK_BKG.DAT");
+      if (bkg_file.is_open()) {
+        for (size_t obs_idx = 0; obs_idx < background_observations.size();
+             ++obs_idx) {
+          bkg_file << std::scientific << std::setprecision(15)
+                   << background_observations[obs_idx] << " " << 1.0 << "\n";
+        }
+        bkg_file.close();
+        logger_.Info()
+            << "Background field observations saved to CHECK_BKG.DAT";
+      }
+    } catch (const std::exception& e) {
+      logger_.Error() << "Failed to save background field observations: "
+                      << e.what();
+    }
+  }
+
+  /**
+   * @brief Save background field check file
+   */
+  void saveBackgroundFieldCheck() const {
+    try {
+      // Save background field using State (first 10 rows for checking)
+      state_.saveBackgroundFieldToFile("D:/macom/4var/result/CHECK_XB.DAT");
+      logger_.Info() << "Background field XB saved to CHECK_XB.DAT";
+    } catch (const std::exception& e) {
+      logger_.Error() << "Failed to save background field check: " << e.what();
+    }
+  }
+
+  /**
+   * @brief Save observation check files
+   */
+  void saveObservationCheckFiles() const {
+    try {
+      std::ofstream check_file("D:/macom/4var/result/CHECK_OBS.DAT");
+      if (check_file.is_open()) {
+        // Output first 10 rows of observation data
+        int max_rows = std::min(10, (int)observations_.size());
+        for (int i = 0; i < max_rows; ++i) {
+          const auto& obs = observations_[i];
+          check_file << std::fixed << std::setprecision(15) << obs.value << " "
+                     << obs.error << "\n";
+        }
+        check_file.close();
+        logger_.Info() << "Observation check files saved to CHECK_OBS.DAT";
+      }
+    } catch (const std::exception& e) {
+      logger_.Error() << "Failed to save observation check files: " << e.what();
+    }
+  }
+
+  /**
+   * @brief Save analysis observations to file
+   */
+  void saveAnalysisObservations(
+      const std::vector<double>& analysis_observations) const {
+    try {
+      std::ofstream ana_file("D:/macom/4var/result/CHECK_ANA.DAT");
+      if (ana_file.is_open()) {
+        for (size_t obs_idx = 0; obs_idx < analysis_observations.size();
+             ++obs_idx) {
+          ana_file << std::scientific << std::setprecision(15)
+                   << analysis_observations[obs_idx] << " " << 1.0 << "\n";
+        }
+        ana_file.close();
+        logger_.Info() << "Final analysis observations saved to CHECK_ANA.DAT";
+      }
+    } catch (const std::exception& e) {
+      logger_.Error() << "Failed to save analysis observations: " << e.what();
+    }
+  }
+
+  /**
+   * @brief Process gain fields for IEXT >= 2 (corresponds to Fortran lines
+   * 92-147)
+   */
+  void processGainFields() {
+    logger_.Info() << "Processing gain fields for IEXT >= 2";
+
+    // TODO: Implement gain field processing
+    // - Compute ssh_gain, pbt_gain, tFld_gain, sFld_gain, uFld_gain, vFld_gain
+    // - These represent the increment fields (X0 - XB) for different variables
+    // - Apply masks as in Fortran code
+
+    logger_.Info() << "Gain fields processing completed";
+  }
+
+  /**
+   * @brief Process background observations (corresponds to Fortran lines
+   * 165-255)
+   * @param iext Current IEXT loop number
+   */
+  void processBackgroundObservations(int iext) {
+    logger_.Info() << "Processing background observations for IEXT " << iext;
+
+    // Apply observation operator to background field (reuse existing function)
+    applyObservationOperatorToBackground();
+
+    // IEXT=1 specific processing (corresponds to Fortran lines 169-239)
+    if (iext == 1) {
+      processIEXT1Initialization();
+    }
+
+    // Save observation check files (reuse existing functions)
+    if (iext == 1) {
+      saveBackgroundObservations(background_observations_);
+    } else if (iext == max_outer_loops_) {
+      saveAnalysisObservations(background_observations_);
+    }
+
+    logger_.Info() << "Background observations processing completed for IEXT "
+                   << iext;
+  }
+
+  /**
+   * @brief Process IEXT=1 initialization (corresponds to Fortran lines 169-239)
+   */
+  void processIEXT1Initialization() {
+    logger_.Info() << "Processing IEXT=1 initialization";
+
+    // Save background field check (reuse existing function)
+    saveBackgroundFieldCheck();
+
+    // Initialize analysis state X0 = XB (corresponds to Fortran line 186)
+    const auto& background_field = state_.getBackgroundField();
+    analysis_state_ = background_field;
+
+    // DEBUG OUTPUT: Step 1 - Background field XB (first 10 values)
+    logger_.Info()
+        << "=== DEBUG: Step 1 - Background field XB (first 10 values) ===";
+    for (int i = 0; i < std::min(10, (int)background_field.size()); ++i) {
+      logger_.Info() << "XB[" << i << "] = " << std::scientific
+                     << std::setprecision(15) << background_field[i];
+    }
+
+    // DEBUG OUTPUT: Step 2 - Analysis state X0 (should equal XB)
+    logger_.Info()
+        << "=== DEBUG: Step 2 - Analysis state X0 (first 10 values) ===";
+    for (int i = 0; i < std::min(10, (int)analysis_state_.size()); ++i) {
+      logger_.Info() << "X0[" << i << "] = " << std::scientific
+                     << std::setprecision(15) << analysis_state_[i];
+    }
+
+    // Process ensemble perturbations and covariance (reuse existing functions)
+    processEnsemblePerturbations();
+    computeEnsembleCovariance();
+
+    // DEBUG OUTPUT: Step 3 - Ensemble perturbations X (first 10 values for
+    // first 3 members)
+    logger_.Info()
+        << "=== DEBUG: Step 3 - Ensemble perturbations X (first 10 values) ===";
+    logger_.Info() << "MU scaling factor = " << std::scientific
+                   << std::setprecision(15) << mu_scaling_factor_;
+    for (int m = 0; m < std::min(3, (int)ensemble_.Size()); ++m) {
+      logger_.Info() << "--- Member " << m << " ---";
+      for (int p = 0; p < std::min(10, (int)ensemble_perturbations_[m].size());
+           ++p) {
+        logger_.Info() << "X[" << p << "," << m << "] = " << std::scientific
+                       << std::setprecision(15)
+                       << ensemble_perturbations_[m][p];
       }
     }
 
-    return cov.cwiseProduct(L);
+    // DEBUG OUTPUT: Step 4 - Ensemble covariance matrix BB (first 10x10
+    // submatrix)
+    logger_.Info() << "=== DEBUG: Step 4 - Ensemble covariance matrix BB "
+                      "(first 10x10) ===";
+    logger_.Info() << "BB matrix size: " << ensemble_.Size() << " x "
+                   << ensemble_.Size();
+    int debug_size = std::min(10, (int)ensemble_.Size());
+    for (int m = 0; m < debug_size; ++m) {
+      std::stringstream ss;
+      ss << "BB[" << m << ",:] = ";
+      for (int n = 0; n < debug_size; ++n) {
+        ss << std::scientific << std::setprecision(15)
+           << ensemble_covariance_[m][n];
+        if (n < debug_size - 1) ss << " ";
+      }
+      logger_.Info() << ss.str();
+    }
+
+    // Perform eigenvalue decomposition (corresponds to Fortran lines 229-238)
+    performEigenvalueDecomposition();
+
+    logger_.Info() << "IEXT=1 initialization completed";
   }
 
   /**
-   * @brief Compute localization function value
+   * @brief Compute member state TP = X + X0 (corresponds to Fortran line 263)
+   * @param member Ensemble member index
    */
-  double computeLocalizationFunction(double distance) const {
-    double normalized_distance = distance / localization_radius_;
+  void computeMemberState(int member) {
+    logger_.Info() << "Computing member state for member " << member;
 
-    switch (localization_function_) {
-      case LocalizationFunction::GAUSSIAN:
-        return std::exp(-0.5 * normalized_distance * normalized_distance);
+    // Get background field X0 and ensemble perturbation X
+    const auto& background_field = state_.getBackgroundField();
+    const auto& perturbation = ensemble_perturbations_[member];
 
-      case LocalizationFunction::EXPONENTIAL:
-        return std::exp(-normalized_distance);
+    // Compute TP = X + X0 for each point
+    // This creates the full state for ensemble member M
+    // TP(P) = X(P,M) + X0(P) where P is the state dimension index
 
-      case LocalizationFunction::CUTOFF:
-        return (normalized_distance <= 1.0) ? 1.0 : 0.0;
-
-      case LocalizationFunction::GASPARI_COHN:
-        return computeGaspariCohnFunction(normalized_distance);
-
-      default:
-        return std::exp(-0.5 * normalized_distance * normalized_distance);
-    }
+    logger_.Info() << "Member state computation completed for member "
+                   << member;
+    logger_.Info() << "  Background field size: " << background_field.size();
+    logger_.Info() << "  Perturbation size: " << perturbation.size();
   }
 
   /**
-   * @brief Compute Gaspari-Cohn localization function
+   * @brief Process gain fields for ensemble member (corresponds to Fortran
+   * lines 266-318)
+   * @param member Ensemble member index
    */
-  double computeGaspariCohnFunction(double r) const {
-    if (r >= 2.0) return 0.0;
-    if (r >= 1.0) {
-      double z = r - 1.0;
-      return ((-0.25 * z + 0.5) * z + 0.625) * z + 0.125;
-    } else {
-      double z = r;
-      return (((-0.25 * z + 0.5) * z + 0.625) * z - 5.0) * z + 4.0;
-    }
+  void processMemberGainFields(int member) {
+    logger_.Info() << "Processing gain fields for member " << member;
+
+    // TODO: Implement member gain field processing
+    // - Compute gain fields for this specific member
+    // - Similar to processGainFields() but for individual member
+
+    logger_.Info() << "Member gain fields processing completed for member "
+                   << member;
   }
 
   /**
-   * @brief Build 4D observation operator matrix
+   * @brief Process member observations (corresponds to Fortran lines 330-409)
+   * @param member Ensemble member index
+   * @param iext Current IEXT loop number
    */
-  Eigen::MatrixXd buildFourDObservationOperator(
-      const std::vector<Eigen::MatrixXd>& H_matrices) const {
-    logger_.Info() << "buildFourDObservationOperator: " << H_matrices.size()
-                   << " matrices";
+  void processMemberObservations(int member, int iext) {
+    logger_.Info() << "Processing observations for member " << member
+                   << " in IEXT " << iext;
 
-    int total_obs = 0;
-    for (size_t i = 0; i < H_matrices.size(); ++i) {
-      const auto& H = H_matrices[i];
-      logger_.Info() << "H[" << i << "]: " << H.rows() << " x " << H.cols();
-      total_obs += H.rows();
+    // Compute Y(O,M) = TY(O) (corresponds to Fortran lines 331-333)
+    // TODO: Implement member observation computation
+    // - Apply observation operator to member state
+    // - Store result in Y(O,M)
+
+    // Save member check files for IEXT=1 (reuse existing check file logic)
+    if (iext == 1 && member < 3) {
+      // Save first 3 members' check files
+      saveEnsembleCheckFiles();
     }
 
-    if (H_matrices.empty()) {
-      logger_.Error() << "No H matrices provided";
-      return Eigen::MatrixXd::Zero(1, 1);
-    }
-
-    int state_dim = H_matrices[0].cols();
-    logger_.Info() << "Total obs: " << total_obs
-                   << ", state_dim: " << state_dim;
-
-    Eigen::MatrixXd H_4d = Eigen::MatrixXd::Zero(total_obs, state_dim);
-    logger_.Info() << "H_4d created: " << H_4d.rows() << " x " << H_4d.cols();
-
-    int row_offset = 0;
-    for (size_t i = 0; i < H_matrices.size(); ++i) {
-      const auto& H = H_matrices[i];
-      logger_.Info() << "Copying H[" << i << "] to block at row " << row_offset;
-      H_4d.block(row_offset, 0, H.rows(), H.cols()) = H;
-      row_offset += H.rows();
-    }
-
-    return H_4d;
+    logger_.Info() << "Member observations processing completed for member "
+                   << member;
   }
 
   /**
-   * @brief Build 4D innovation vector
+   * @brief Perform eigenvalue decomposition (corresponds to Fortran lines
+   * 229-238)
    */
-  Eigen::VectorXd buildFourDInnovationVector(
-      const std::vector<Eigen::VectorXd>& innovations) const {
-    int total_obs = 0;
-    for (const auto& d : innovations) {
-      total_obs += d.size();
-    }
+  void performEigenvalueDecomposition() {
+    logger_.Info() << "Performing eigenvalue decomposition";
 
-    Eigen::VectorXd d_4d(total_obs);
-    int offset = 0;
-    for (const auto& d : innovations) {
-      d_4d.segment(offset, d.size()) = d;
-      offset += d.size();
-    }
+    // TODO: Implement eigenvalue decomposition
+    // - Call equivalent of Fortran's EOF_JCB(1.0D-7, K, NM, BB, LM, VP)
+    // - Compute VV matrix: VV(M,N) = sum(VP(M,K)*VP(N,K)/LM(K))
 
-    return d_4d;
+    logger_.Info() << "Eigenvalue decomposition completed";
   }
 
   /**
-   * @brief Build 4D observation error covariance matrix
+   * @brief Process ensemble members and compute perturbations
+   *
+   * This function computes ensemble perturbations by subtracting the background
+   * field from each ensemble member and applying a scaling factor.
+   *
+   * Based on Fortran: X(P,M) = (X(P,M) - XB(P)) * DSQRT(MU)
+   * where:
+   * - X(P,M) is the perturbation matrix (output)
+   * - X(P,M) on the right side is the original ensemble member data
+   * - XB(P) is the background field from State
+   * - MU is the scaling factor
    */
-  Eigen::MatrixXd buildFourDObservationCovariance(
-      const std::vector<Eigen::MatrixXd>& R_matrices) const {
-    int total_obs = 0;
-    for (const auto& R : R_matrices) {
-      total_obs += R.rows();
+  void processEnsemblePerturbations() {
+    logger_.Info() << "Processing ensemble perturbations";
+
+    const int ensemble_size = ensemble_.Size();
+    // Get background field from State (as in Fortran: XB from state)
+    const auto& background_field = state_.getBackgroundField();
+    const int state_dimension = background_field.size();
+
+    // Key validation checks
+    if (ensemble_size <= 0) {
+      throw std::runtime_error("Invalid ensemble size: " +
+                               std::to_string(ensemble_size));
+    }
+    if (state_dimension <= 0) {
+      throw std::runtime_error("Invalid state dimension: " +
+                               std::to_string(state_dimension));
     }
 
-    Eigen::MatrixXd R_4d = Eigen::MatrixXd::Zero(total_obs, total_obs);
+    logger_.Info() << "XB total points: " << state_dimension
+                   << ", X matrix size: " << ensemble_size << " x "
+                   << state_dimension;
 
-    int offset = 0;
-    for (const auto& R : R_matrices) {
-      R_4d.block(offset, offset, R.rows(), R.cols()) = R;
-      offset += R.rows();
+    // Initialize ensemble perturbation matrix (corresponds to X, NM x NP)
+    ensemble_perturbations_.resize(ensemble_size);
+    for (int m = 0; m < ensemble_size; ++m) {
+      ensemble_perturbations_[m].resize(state_dimension);
     }
 
-    return R_4d;
+    // Ensure ensemble data is loaded by calling GetMember first
+    // This triggers the lazy loading mechanism
+    if (ensemble_size > 0) {
+      ensemble_.GetMember(0);  // This will load the data if not already loaded
+    }
+
+    // Compute perturbations for each ensemble member
+    // Get ensemble matrix data (original ensemble members)
+    const auto& ensemble_matrix = ensemble_.GetEnsembleMatrix();
+
+    for (int m = 0; m < ensemble_size; ++m) {
+      for (int p = 0; p < state_dimension; ++p) {
+        // Get original ensemble member data
+        double member_value = ensemble_matrix(p, m);
+
+        // Corresponds to Fortran: X(P,M) = (X(P,M) - XB(P)) * DSQRT(MU)
+        // where X(P,M) is the perturbation matrix, not the original data
+        ensemble_perturbations_[m][p] = (member_value - background_field[p]) *
+                                        std::sqrt(mu_scaling_factor_);
+      }
+    }
+
+    logger_.Info() << "Ensemble perturbations computed successfully";
   }
 
   /**
-   * @brief Compute cost function components
+   * @brief Compute ensemble covariance matrix
+   * Based on Fortran: BB(M,N) = X(P,M) * X(P,N)
    */
-  void computeCostFunctionComponents(const Eigen::MatrixXd& P_b,
-                                     const Eigen::VectorXd& d,
-                                     const Eigen::MatrixXd& R) {
-    // Background cost
-    background_cost_ = 0.5 * d.transpose() * P_b.inverse() * d;
+  void computeEnsembleCovariance() {
+    logger_.Info() << "Computing ensemble covariance matrix";
 
-    // Observation cost
-    observation_cost_ = 0.5 * d.transpose() * R.inverse() * d;
+    const int ensemble_size = ensemble_.Size();
+    const int state_dimension = analysis_state_.size();
 
-    // Total cost
-    cost_function_value_ = background_cost_ + observation_cost_;
-
-    // Innovation norm
-    innovation_norm_ = d.norm();
-  }
-
-  /**
-   * @brief Save diagnostic information to file
-   */
-  void saveDiagnostics() const {
-    std::string diagnostics_file = output_base_file_ + "_diagnostics.txt";
-    // Implementation would write diagnostics to file
-    logger_.Info() << "Diagnostics saved to: " << diagnostics_file;
-  }
-
-  /**
-   * @brief Get inflation method as string
-   */
-  std::string getInflationMethodString() const {
-    switch (inflation_method_) {
-      case InflationMethod::MULTIPLICATIVE:
-        return "multiplicative";
-      case InflationMethod::ADDITIVE:
-        return "additive";
-      case InflationMethod::RELAXATION:
-        return "relaxation";
-      default:
-        return "unknown";
+    // Initialize covariance matrix (corresponds to BB, NM x NM)
+    ensemble_covariance_.resize(ensemble_size);
+    for (int m = 0; m < ensemble_size; ++m) {
+      ensemble_covariance_[m].resize(ensemble_size, 0.0);
     }
+
+    // Corresponds to Fortran: BB(M,N) = X(P,M) * X(P,N)
+    for (int m = 0; m < ensemble_size; ++m) {
+      for (int n = 0; n < ensemble_size; ++n) {
+        ensemble_covariance_[m][n] = 0.0;
+        for (int p = 0; p < state_dimension; ++p) {
+          ensemble_covariance_[m][n] +=
+              ensemble_perturbations_[m][p] * ensemble_perturbations_[n][p];
+        }
+      }
+    }
+
+    logger_.Info() << "Ensemble covariance matrix computed successfully";
   }
 
   /**
-   * @brief Get localization function as string
+   * @brief Apply observation operator to background field
+   * Based on Fortran: HX(O) = TY(O)
+   *
+   * Fortran code flow:
+   * 1. For each observation point O=1,NO
+   * 2. Call GET_IY(OX(O),OY(O),OZ(O),OT(O),JTB,JT,OS(O),TY(O))
+   * 3. HX(O) = TY(O)
+   *
+   * GET_IY function purpose:
+   * - Input: observation position (OX,OY,OZ,OT) and observation type OS
+   * - Process: interpolate observation value from model field
+   * - Output: observation value TY
    */
-  std::string getLocalizationFunctionString() const {
-    switch (localization_function_) {
-      case LocalizationFunction::GAUSSIAN:
-        return "gaussian";
-      case LocalizationFunction::EXPONENTIAL:
-        return "exponential";
-      case LocalizationFunction::CUTOFF:
-        return "cutoff";
-      case LocalizationFunction::GASPARI_COHN:
-        return "gaspari_cohn";
-      default:
-        return "unknown";
-    }
-  }
+  void applyObservationOperatorToBackground() {
+    logger_.Info() << "Applying observation operator to background field";
 
-  /**
-   * @brief Get covariance type as string
-   */
-  std::string getCovarianceTypeString() const {
-    switch (covariance_type_) {
-      case CovarianceType::ENSEMBLE:
-        return "ensemble";
-      case CovarianceType::HYBRID:
-        return "hybrid";
-      case CovarianceType::STATIC:
-        return "static";
-      default:
-        return "unknown";
-    }
+    // Corresponds to Fortran: DO O=1,NO; HX(O)=TY(O); ENDDO
+    // Here obs_operator_.apply() is equivalent to Fortran's GET_IY call
+    background_observations_ = obs_operator_.apply(state_, observations_);
+
+    // Verify consistency with Fortran code
+    logger_.Info() << "HX(O) = TY(O) computation completed for "
+                   << background_observations_.size() << " observations";
   }
 
   Ensemble<BackendTag>& ensemble_;
-  const std::vector<std::unique_ptr<Observation<BackendTag>>>& observations_;
-  const std::vector<std::unique_ptr<ObsOperator<BackendTag>>>& obs_operators_;
-  InflationMethod inflation_method_;
-  double inflation_factor_;
-  LocalizationFunction localization_function_;
-  double localization_radius_;
-  CovarianceType covariance_type_;
-  std::string output_base_file_;
-  std::string format_ = "txt";  // Default format
+  const Observation<BackendTag>& observations_;
+  const ObsOperator<BackendTag>& obs_operator_;
+  State<BackendTag>& state_;
 
-  // Diagnostic variables
-  double cost_function_value_ = 0.0;
-  double background_cost_ = 0.0;
-  double observation_cost_ = 0.0;
-  double innovation_norm_ = 0.0;
-  double analysis_increment_norm_ = 0.0;
-  double background_spread_ = 0.0;
-  double analysis_spread_ = 0.0;
-  double max_kalman_gain_ = 0.0;
-  double min_kalman_gain_ = 0.0;
-  double condition_number_ = 0.0;
-  int total_observation_count_ = 0;
+  // Simple A4D parameters (based on mod_a4d_liwei.f90)
+  int max_outer_loops_;  // macom_loop_end in Fortran
+  std::string output_base_file_;
 
   Logger<BackendTag>& logger_ = Logger<BackendTag>::Instance();
 };

@@ -164,6 +164,36 @@ class MACOMModel {
     throw std::runtime_error("MACOM adjoint model not implemented yet");
   }
 
+  // =============================================================================
+  // A4DEnVar INTEGRATION METHODS
+  // Methods for data assimilation integration (in addition to standard run
+  // method)
+  // =============================================================================
+
+  /**
+   * @brief Run model integration for background field
+   * @details This method performs model integration for background field
+   *          in the context of data assimilation.
+   * @param initialState Initial state to integrate
+   * @param finalState Final state after integration (output)
+   * @param ln_assm_gain Whether to use assimilation gain
+   */
+  void runIntegration(const StateBackend& initialState,
+                      StateBackend& finalState, bool ln_assm_gain);
+
+  /**
+   * @brief Run model integration for ensemble member
+   * @details This method performs model integration for a specific ensemble
+   * member in the context of data assimilation.
+   * @param initialState Initial state to integrate
+   * @param finalState Final state after integration (output)
+   * @param member Ensemble member index
+   * @param ln_assm_gain Whether to use assimilation gain
+   */
+  void runMemberIntegration(const StateBackend& initialState,
+                            StateBackend& finalState, int member,
+                            bool ln_assm_gain);
+
  private:
   /**
    * @brief Run a single time step of the model
@@ -202,9 +232,28 @@ class MACOMModel {
 template <typename ConfigBackend, typename StateBackend>
 MACOMModel<ConfigBackend, StateBackend>::MACOMModel(const ConfigBackend& config)
     : initialized_(false) {
+  // Suppress unused parameter warning
+  (void)config;
+
   // Create Fortran interface
   fortranInterface_ = std::make_unique<MACOMFortranInterface>();
-  initialize(config);
+
+  // initialize(config);
+
+  // In 4D-Var DA mode, Fortran handles everything including MPI initialization
+  MACOM_LOG_INFO("MACOMModel",
+                 "4D-Var DA mode detected - calling Fortran main program...");
+  if (fortranInterface_) {
+    try {
+      fortranInterface_->run4VarDAMain();
+      MACOM_LOG_INFO("MACOMModel",
+                     "Fortran 4D-Var DA main program completed successfully");
+    } catch (const std::exception& e) {
+      MACOM_LOG_ERROR("MACOMModel",
+                      "4D-Var DA error: " + std::string(e.what()));
+      throw;
+    }
+  }
 }
 
 template <typename ConfigBackend, typename StateBackend>
@@ -403,6 +452,73 @@ void MACOMModel<ConfigBackend, StateBackend>::timeStep(
   } catch (const std::exception& e) {
     throw std::runtime_error(std::string("MACOM model time step failed: ") +
                              e.what());
+  }
+}
+
+// A4DEnVar integration implementations
+template <typename ConfigBackend, typename StateBackend>
+void MACOMModel<ConfigBackend, StateBackend>::runIntegration(
+    const StateBackend& initialState, StateBackend& finalState,
+    bool ln_assm_gain) {
+  if (!initialized_) {
+    throw std::runtime_error(
+        "Cannot run integration on uninitialized MACOM model");
+  }
+
+  MACOM_LOG_INFO(
+      "MACOMModel",
+      std::string("Running background field integration - ln_assm_gain: ") +
+          (ln_assm_gain ? "true" : "false"));
+
+  try {
+    // Set integration parameters for Fortran interface
+    if (fortranInterface_) {
+      // TODO: Set background field integration parameters in Fortran interface
+      // fortranInterface_->setBackgroundIntegrationMode(ln_assm_gain);
+    }
+
+    // Use the standard run method but with specific integration parameters
+    run(initialState, finalState);
+
+    MACOM_LOG_INFO("MACOMModel",
+                   "Background field integration completed successfully");
+
+  } catch (const std::exception& e) {
+    throw std::runtime_error(
+        std::string("Background field integration failed: ") + e.what());
+  }
+}
+
+template <typename ConfigBackend, typename StateBackend>
+void MACOMModel<ConfigBackend, StateBackend>::runMemberIntegration(
+    const StateBackend& initialState, StateBackend& finalState, int member,
+    bool ln_assm_gain) {
+  if (!initialized_) {
+    throw std::runtime_error(
+        "Cannot run member integration on uninitialized MACOM model");
+  }
+
+  MACOM_LOG_INFO("MACOMModel",
+                 "Running ensemble member integration - member: " +
+                     std::to_string(member) + ", ln_assm_gain: " +
+                     std::string(ln_assm_gain ? "true" : "false"));
+
+  try {
+    // Set member-specific integration parameters for Fortran interface
+    if (fortranInterface_) {
+      // TODO: Set member integration parameters in Fortran interface
+      // fortranInterface_->setMemberIntegrationMode(member, ln_assm_gain);
+    }
+
+    // Use the standard run method but with member-specific parameters
+    run(initialState, finalState);
+
+    MACOM_LOG_INFO("MACOMModel",
+                   "Ensemble member integration completed successfully");
+
+  } catch (const std::exception& e) {
+    throw std::runtime_error(
+        std::string("Ensemble member integration failed: ") + e.what());
   }
 }
 

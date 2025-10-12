@@ -1,0 +1,91 @@
+logger:
+  app_name: "a4denvar_macom"
+  level: "debug"
+  color: true
+  console: true
+
+# Geometry for the ensemble
+geometry:
+  file: "D:/macom/4var/nmefc_macom_csp_grid_d01.nc"
+
+# State configuration (needed for background field extraction)
+state:
+  file: "D:/macom/4var/nmefc_macom_csp_initinal_d01_hycom_2020010400.nc"
+  timestamp: "2000-01-24T12:00:00Z"
+  state_dimension: 74687333  # NP from mod_csp_basic.f90
+  variables:
+    - "ssh"  # Sea surface height
+    - "u"    # U-velocity
+    - "v"    # V-velocity
+    - "w"    # W-velocity
+    - "t"    # Temperature
+    - "s"    # Salinity
+
+# Model configuration
+model:
+  time_control:
+    start_datetime: "2000-01-24T12:00:00Z"
+    forecast_length: "24h"
+    end_datetime: "2000-01-25T12:00:00Z"
+    time_step: "360s"
+    output_history: true
+    history_file: "./forecast.nc"
+    history_frequency: "3600s"
+  dynamics:
+    advection_scheme: "WENO"
+    diffusion: 0.0
+  physics:
+    microphysics: true
+    radiation: true
+    pbl: true
+    lsm: true 
+    
+# MACOM Ensemble configuration
+ensemble:
+  # MACOM-specific ensemble settings
+  ensemble_file: "D:/macom/4var/X_MEMBER_HYCOM.DAT"  # Path to ensemble member file
+  state_dimension: 74687333  # Dimension of state vector (NP) - from mod_csp_basic.f90
+  ensemble_size: 3  # Number of ensemble members (NM) - from mod_csp_basic.f90
+
+# Observation settings
+observations:
+  types:
+    - sea_surface_temp:
+        if_use: true
+        file: "D:/macom/4var/OBSERVATIONS_20200104.DAT"
+        format: "macom_obs"  # lat lon level time value error type
+        variables:
+          - temperature:
+              if_use: true
+              error: 0.5
+              missing_value: -999.0
+
+# Observation operator settings
+obs_operator:
+  variables:
+    - simple:
+        if_use: true
+        error: 0.1  # standard deviations
+
+# Analysis settings (simplified - no background covariance needed)
+analysis:
+  algorithm: "a4denvar"
+  max_outer_loops: 3  # Number of outer loops (macom_loop_end in Fortran)
+  time_windows: 1
+  format: "nc"
+  output_base_file: "D:/macom/4var/result/ANA_2020010400"
+
+# MACOM-specific settings
+macom:
+  # 4D-Var specific parameters
+  mu: 1.0e-6  # Scaling factor for ensemble perturbations (MU from mod_csp_basic.f90)
+  tolerance: 1.0e-7  # Tolerance for eigenvalue decomposition
+  
+  # Output directories
+  check_dir: "D:/macom/4var/result"
+  analysis_dir: "D:/macom/4var/result"
+  
+  # Debug settings
+  save_ensemble_debug: true
+  save_covariance_matrix: true
+  save_eigenvalues: true

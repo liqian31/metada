@@ -158,9 +158,12 @@ class MACOMObservation {
 
           if (format == "geographic") {
             loadFromGeographicFile(filename, missing_value);
+          } else if (format == "macom_obs") {
+            loadFromMacomObsFile(filename, missing_value);
           } else {
             throw std::runtime_error(
-                "MACOMObservation only supports geographic format");
+                "MACOMObservation supports 'geographic' and 'macom_obs' "
+                "formats");
           }
         }
       }
@@ -392,6 +395,24 @@ class MACOMObservation {
   }
 
   /**
+   * @brief Apply quality control (required by framework)
+   */
+  void applyQC() {
+    // Apply quality control to observations
+    for (auto& obs : observations_) {
+      if (obs.is_valid) {
+        // Basic quality control checks
+        if (obs.value < -5.0 || obs.value > 40.0) {
+          obs.is_valid = false;
+        }
+        if (obs.error <= 0.0) {
+          obs.is_valid = false;
+        }
+      }
+    }
+  }
+
+  /**
    * @brief Load observation data from file (required by framework)
    * @param filename Path to observation file
    * @param error The observation error to assign to all valid points
@@ -411,31 +432,7 @@ class MACOMObservation {
 
   // =============================================================================
   // MACOM SPECIFIC FUNCTIONALITY
-  // These are MACOM-specific methods beyond framework requirements
   // =============================================================================
-
-  /**
-   * @brief Apply quality control to oceanographic observations
-   */
-  void applyQC() {
-    for (auto& obs : observations_) {
-      if (obs.is_valid) {
-        // Oceanographic QC: Check for reasonable temperature/salinity ranges
-        if (obs.value < -5.0 || obs.value > 40.0) {  // Temperature range
-          obs.is_valid = false;
-        }
-
-        // Check for reasonable latitude/longitude
-        if (obs.location.getCoordinateSystem() ==
-            CoordinateSystem::GEOGRAPHIC) {
-          auto [lat, lon, level] = obs.location.getGeographicCoords();
-          if (lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 360.0) {
-            obs.is_valid = false;
-          }
-        }
-      }
-    }
-  }
 
   /**
    * @brief Load observation data from geographic coordinate file
@@ -452,12 +449,12 @@ class MACOMObservation {
       throw std::runtime_error("Could not open observation file: " + filename);
     }
 
+    // Reserve a reasonable amount of space
+    observations_.reserve(100000);
+
     std::string line;
     while (std::getline(file, line)) {
-      // Skip comment lines
-      if (line.empty() || line[0] == '#') {
-        continue;
-      }
+      if (line.empty() || line[0] == '#') continue;
 
       std::istringstream iss(line);
       double lat, lon, level, value, error;
@@ -469,8 +466,73 @@ class MACOMObservation {
           observations_.emplace_back(location, value, error);
         }
       }
-      // If parsing fails, skip the line (could log warning in future)
     }
+  }
+
+  /**
+   * @brief Load observation data from MACOM observation file
+   * @param filename Path to MACOM observation file
+   * @param missing_value The value that indicates a missing observation.
+   *
+   * Expected format: lat lon level time value error type (one observation per
+   * line) This format corresponds to Fortran's OBSERVATIONS_20200104.DAT format
+   * Lines starting with # are treated as comments and ignored
+   */
+  void loadFromMacomObsFile(const std::string& filename, double missing_value) {
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+      throw std::runtime_error("Could not open MACOM observation file: " +
+                               filename);
+    }
+
+    // Control switch for testing - set to true to limit observations to 1000
+    // rows
+    const bool LIMIT_OBSERVATIONS = true;
+    const size_t MAX_OBSERVATIONS = 1000;
+
+    // Reserve a reasonable amount of space to reduce reallocations
+    observations_.reserve(
+        100000);  // Reserve space for 100k observations initially
+
+    std::string line;
+    size_t line_count = 0;
+    size_t valid_obs_count = 0;
+
+    while (std::getline(file, line)) {
+      line_count++;
+      if (line.empty() || line[0] == '#') continue;
+
+      std::istringstream iss(line);
+      double lat, lon, level, time, value, error;
+      int type;
+
+      if (iss >> lat >> lon >> level >> time >> value >> error >> type) {
+        if (value != missing_value) {
+          valid_obs_count++;
+
+          // Create observation point and add to vector
+          Location location(lat, lon, level, CoordinateSystem::GEOGRAPHIC);
+          observations_.emplace_back(location, value, error, time, type);
+
+          // Progress indicator (less frequent to reduce I/O overhead)
+          if (valid_obs_count % 20000 == 0) {
+            std::cout << "--> Processed " << valid_obs_count
+                      << " observations..." << std::endl;
+          }
+
+          // Limit observations for testing - uncomment the next 3 lines to
+          // enable
+          if (LIMIT_OBSERVATIONS && valid_obs_count >= MAX_OBSERVATIONS) {
+            std::cout << "--> Limited to " << MAX_OBSERVATIONS
+                      << " observations for testing" << std::endl;
+            break;
+          }
+        }
+      }
+    }
+
+    std::cout << "--> Total lines: " << line_count << std::endl;
+    std::cout << "--> Valid observations: " << valid_obs_count << std::endl;
   }
 
   /**
@@ -483,15 +545,92 @@ class MACOMObservation {
       throw std::runtime_error("Could not open file for writing: " + filename);
     }
 
-    file << "# lat lon level value error\n";
+    file << "# lat lon level time value error type\n";
     for (const auto& obs : observations_) {
       if (obs.is_valid) {
         if (obs.location.getCoordinateSystem() ==
             CoordinateSystem::GEOGRAPHIC) {
           auto [lat, lon, level] = obs.location.getGeographicCoords();
           file << std::fixed << std::setprecision(6) << lat << " " << lon << " "
-               << level << " " << obs.value << " " << obs.error << "\n";
+               << level << " " << obs.time << " " << obs.value << " "
+               << obs.error << " " << obs.obs_type << "\n";
         }
+      }
+    }
+  }
+
+  /**
+   * @brief Validate observation data quality (equivalent to Fortran observation
+   * validation)
+   * @return true if all observations pass validation, false otherwise
+   * @details This function performs quality control checks similar to Fortran
+   * code
+   */
+  bool validateObservations() const {
+    bool all_valid = true;
+
+    for (size_t i = 0; i < observations_.size(); ++i) {
+      const auto& obs = observations_[i];
+
+      if (obs.is_valid) {
+        // Check for reasonable temperature/salinity ranges (oceanographic QC)
+        if (obs.value < -5.0 || obs.value > 40.0) {
+          std::cerr << "Warning: Observation " << i
+                    << " has unreasonable value: " << obs.value << std::endl;
+          all_valid = false;
+        }
+
+        // Check for reasonable error values
+        if (obs.error <= 0.0) {
+          std::cerr << "Warning: Observation " << i
+                    << " has invalid error: " << obs.error << std::endl;
+          all_valid = false;
+        }
+
+        // Check for reasonable latitude/longitude
+        if (obs.location.getCoordinateSystem() ==
+            CoordinateSystem::GEOGRAPHIC) {
+          auto [lat, lon, level] = obs.location.getGeographicCoords();
+          if (lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 360.0) {
+            std::cerr << "Warning: Observation " << i
+                      << " has invalid coordinates: lat=" << lat
+                      << ", lon=" << lon << std::endl;
+            all_valid = false;
+          }
+        }
+      }
+    }
+
+    return all_valid;
+  }
+
+  /**
+   * @brief Print observation summary (equivalent to Fortran print statements)
+   * @details This function prints observation information similar to Fortran's
+   * print statements
+   */
+  void printObservationSummary() const {
+    std::cout << "--> Observation data loaded successfully" << std::endl;
+    std::cout << "--> Total observations: " << observations_.size()
+              << std::endl;
+    std::cout << "--> Valid observations: " << getValidCount() << std::endl;
+
+    if (!observations_.empty()) {
+      std::cout << "--> Observation value range: [";
+      double min_val = std::numeric_limits<double>::max();
+      double max_val = std::numeric_limits<double>::lowest();
+
+      for (const auto& obs : observations_) {
+        if (obs.is_valid) {
+          min_val = std::min(min_val, obs.value);
+          max_val = std::max(max_val, obs.value);
+        }
+      }
+
+      if (min_val != std::numeric_limits<double>::max()) {
+        std::cout << min_val << ", " << max_val << "]" << std::endl;
+      } else {
+        std::cout << "N/A]" << std::endl;
       }
     }
   }
@@ -563,32 +702,17 @@ class MACOMObservation {
    */
   std::string getStatistics() const {
     std::stringstream ss;
-    ss << "Observation Statistics:\n";
-    ss << "  Total observations: " << observations_.size() << "\n";
-    ss << "  Valid observations: " << getValidCount() << "\n";
-    ss << "  Invalid observations: " << (observations_.size() - getValidCount())
-       << "\n";
+    ss << "=== Observation Statistics ===\n";
+    ss << "Total observations: " << observations_.size() << "\n";
 
-    if (!observations_.empty()) {
-      double min_val = std::numeric_limits<double>::max();
-      double max_val = std::numeric_limits<double>::lowest();
-      double sum = 0.0;
-      size_t valid_count = 0;
-
-      for (const auto& obs : observations_) {
-        if (obs.is_valid) {
-          min_val = std::min(min_val, obs.value);
-          max_val = std::max(max_val, obs.value);
-          sum += obs.value;
-          valid_count++;
-        }
-      }
-
-      if (valid_count > 0) {
-        ss << "  Value range: [" << min_val << ", " << max_val << "]\n";
-        ss << "  Mean value: " << (sum / valid_count) << "\n";
-      }
+    size_t valid_count = 0;
+    for (const auto& obs : observations_) {
+      if (obs.is_valid) valid_count++;
     }
+
+    ss << "Valid observations: " << valid_count << "\n";
+    ss << "Invalid observations: " << (observations_.size() - valid_count)
+       << "\n";
 
     return ss.str();
   }

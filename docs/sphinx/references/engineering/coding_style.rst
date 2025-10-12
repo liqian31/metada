@@ -23,13 +23,3 @@ Coding Style
      - Plugin system
      - IDE integration
 
-3. **fprettify**
-   
-   - `fprettify Documentation <https://github.com/pseewald/fprettify>`_
-   - Description: Auto-formatter for modern Fortran code
-   - Key features:
-   
-     - Configurable indentation
-     - Case conversion
-     - Consistent whitespace
-     - Source code preservation

@@ -1,7 +1,7 @@
 # Function to add formatting target
 function(AddFormatTarget target_name src_dir)
     if(NOT ClangFormat_EXECUTABLE)
-        message(WARNING "clang-format not found, code formatting target will not be available")
+        # Silently skip formatting if clang-format not available
         return()
     endif()
 

@@ -189,6 +189,54 @@ class Model : private NonCopyable {
   }
 
   /**
+   * @brief Run model integration for background field
+   * @details This method performs model integration for background field
+   *          in the context of data assimilation.
+   * @param initialState Initial state to integrate
+   * @param finalState Final state after integration (output)
+   * @param ln_assm_gain Whether to use assimilation gain
+   */
+  void runIntegration(const State<BackendTag>& initialState,
+                      State<BackendTag>& finalState, bool ln_assm_gain) {
+    if (!backend_.isInitialized()) {
+      throw std::runtime_error("Model not initialized");
+    }
+
+    try {
+      backend_.runIntegration(initialState.backend(), finalState.backend(),
+                              ln_assm_gain);
+    } catch (const std::exception& e) {
+      throw std::runtime_error(
+          std::string("Background field integration failed: ") + e.what());
+    }
+  }
+
+  /**
+   * @brief Run model integration for ensemble member
+   * @details This method performs model integration for a specific ensemble
+   * member in the context of data assimilation.
+   * @param initialState Initial state to integrate
+   * @param finalState Final state after integration (output)
+   * @param member Ensemble member index
+   * @param ln_assm_gain Whether to use assimilation gain
+   */
+  void runMemberIntegration(const State<BackendTag>& initialState,
+                            State<BackendTag>& finalState, int member,
+                            bool ln_assm_gain) {
+    if (!backend_.isInitialized()) {
+      throw std::runtime_error("Model not initialized");
+    }
+
+    try {
+      backend_.runMemberIntegration(initialState.backend(),
+                                    finalState.backend(), member, ln_assm_gain);
+    } catch (const std::exception& e) {
+      throw std::runtime_error(
+          std::string("Ensemble member integration failed: ") + e.what());
+    }
+  }
+
+  /**
    * @brief Get the backend instance
    *
    * This method provides direct access to the backend model implementation.

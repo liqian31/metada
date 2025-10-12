@@ -64,6 +64,8 @@ class ObservationPoint {
                       ///< Location class
   double value;       ///< Measured/observed value in appropriate physical units
   double error;       ///< Observation error or uncertainty (standard deviation)
+  double time;   ///< Observation time (in seconds or appropriate time units)
+  int obs_type;  ///< Observation type (1=T, 2=S, 3=U, 4=V, 5=SSH, 11=SST, etc.)
   bool is_valid;  ///< Data quality flag indicating whether the observation is
                   ///< valid for use
 
@@ -72,7 +74,8 @@ class ObservationPoint {
   // ============================================================================
 
   /**
-   * @brief Construct a valid observation with location, value, and error
+   * @brief Construct a valid observation with location, value, error, time, and
+   * type
    *
    * Creates a complete observation point with all necessary information for
    * data assimilation. The observation is automatically marked as valid.
@@ -80,12 +83,20 @@ class ObservationPoint {
    * @param loc Spatial location of the observation
    * @param val Measured value in appropriate physical units
    * @param err Observation error/uncertainty (typically standard deviation)
+   * @param t Observation time (in seconds or appropriate time units)
+   * @param type Observation type (1=T, 2=S, 3=U, 4=V, 5=SSH, 11=SST, etc.)
    *
    * @note The error parameter should represent the standard deviation of the
    *       measurement uncertainty, not variance or other error metrics.
    */
-  ObservationPoint(const Location& loc, double val, double err)
-      : location(loc), value(val), error(err), is_valid(true) {}
+  ObservationPoint(const Location& loc, double val, double err, double t = 0.0,
+                   int type = 1)
+      : location(loc),
+        value(val),
+        error(err),
+        time(t),
+        obs_type(type),
+        is_valid(true) {}
 
   /**
    * @brief Construct an invalid observation placeholder at a location
@@ -95,12 +106,18 @@ class ObservationPoint {
    * structures or representing missing/rejected observations.
    *
    * @param loc Spatial location where observation should be taken
+   * @param t Observation time (in seconds or appropriate time units)
    *
    * @note The value and error are initialized to 0.0, and is_valid is set to
    * false. These should be set appropriately before using the observation.
    */
-  ObservationPoint(const Location& loc)
-      : location(loc), value(0.0), error(0.0), is_valid(false) {}
+  ObservationPoint(const Location& loc, double t = 0.0)
+      : location(loc),
+        value(0.0),
+        error(0.0),
+        time(t),
+        obs_type(0),
+        is_valid(false) {}
 
   // ============================================================================
   // COMPARISON OPERATORS
@@ -110,21 +127,22 @@ class ObservationPoint {
    * @brief Equality comparison operator for ObservationPoint objects
    *
    * Compares all components of two observation points for exact equality:
-   * location, value, error, and validity flag. This is useful for testing,
-   * validation, and duplicate detection in observation datasets.
+   * location, value, error, time, and validity flag. This is useful for
+   * testing, validation, and duplicate detection in observation datasets.
    *
    * @param other ObservationPoint to compare with
-   * @return true if all components (location, value, error, is_valid) are
+   * @return true if all components (location, value, error, time, is_valid) are
    * identical
    * @return false if any component differs
    *
-   * @note This performs exact floating-point comparison for value and error.
-   *       Consider using approximate comparison for real-world applications
+   * @note This performs exact floating-point comparison for value, error, and
+   * time. Consider using approximate comparison for real-world applications
    *       where floating-point precision may be an issue.
    */
   bool operator==(const ObservationPoint& other) const {
     return location == other.location && value == other.value &&
-           error == other.error && is_valid == other.is_valid;
+           error == other.error && time == other.time &&
+           obs_type == other.obs_type && is_valid == other.is_valid;
   }
 };
 

@@ -8,6 +8,7 @@
 #pragma once
 
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <netcdf>
@@ -231,7 +232,8 @@ class MACOMState {
    * @param delta_value Value to add to the state variables (negative to
    * subtract)
    */
-  void modifyValueAtLocation(double lat, double lon, double delta_value);
+  void modifyValueAtLocation(double lat, double lon, double level,
+                             double delta_value);
 
   /**
    * @brief Compute dot product with another state (required by framework)
@@ -245,6 +247,175 @@ class MACOMState {
    * @return Norm value
    */
   double norm() const;
+
+  // =============================================================================
+  // BACKGROUND FIELD (XB) FUNCTIONALITY
+  // These methods handle background field extraction and management
+  // =============================================================================
+
+  /**
+   * @brief Extract background field XB from current state
+   * @details This corresponds to mod_nmefc_macom.f90 lines 80-166 where XB is
+   * extracted from internal model fields (sshB_glo, tFldB_glo, sFldB_glo,
+   * uFldB_glo, vFldB_glo) following the same logic as Fortran code
+   */
+  void extractBackgroundField() {
+    background_field_.clear();
+
+    // Get the expected state dimension from configuration
+    // This should match the NP value from the YAML config
+    size_t expected_state_dim = 74687333;  // Default fallback value
+
+    // Try to get state dimension from config if available
+    try {
+      if (config_.HasKey("state_dimension")) {
+        expected_state_dim = config_.Get("state_dimension").asInt();
+      } else if (config_.HasKey("ensemble")) {
+        // Try to get from ensemble section if available
+        // Note: This is a simplified approach since YamlConfig doesn't have
+        // GetSubsection In practice, the state_dimension should be in the state
+        // section
+        std::cout << "--> Note: state_dimension should be in state section, "
+                     "not ensemble section"
+                  << std::endl;
+      }
+    } catch (const std::exception& e) {
+      std::cout << "--> Warning: Could not read state_dimension from config, "
+                   "using default: "
+                << expected_state_dim << std::endl;
+    }
+
+    // Resize background field to expected state dimension
+    background_field_.resize(expected_state_dim, 0.0);
+
+    // Extract variables in the same order as Fortran code (mod_nmefc_macom.f90)
+    // Order: SSH -> Temperature -> Salinity -> U-velocity -> V-velocity
+    size_t p = 0;  // Index in XB array (corresponds to Fortran P)
+
+    // Define the order of variables as in Fortran code
+    std::vector<std::string> fortran_var_order = {
+        "ssh",  // SSH (sshB_glo) - lines 80-90
+        "t",    // Temperature (tFldB_glo) - lines 108-120
+        "s",    // Salinity (sFldB_glo) - lines 123-135
+        "u",    // U-velocity (uFldB_glo) - lines 138-150
+        "v"     // V-velocity (vFldB_glo) - lines 153-165
+    };
+
+    // Get mask data from geometry
+    const auto& maskC = geometry_.getMaskC();
+    const auto& maskW = geometry_.getMaskW();
+    const auto& maskS = geometry_.getMaskS();
+
+    // Extract variables in Fortran order
+    for (const auto& var_name : fortran_var_order) {
+      if (variables_.find(var_name) != variables_.end()) {
+        const auto& var_data = variables_.at(var_name);
+
+        // Handle SSH differently - it's 2D field in Fortran
+        if (var_name == "ssh") {
+          // SSH is 2D field: only use horizontal dimension (nlpb_)
+          // Apply maskC at the bottom level (nk) - corresponds to Fortran
+          // maskC_glo_ori(I,nk).EQ.1
+          size_t ssh_2d_size = nlpb_;              // 2D field size
+          size_t mask_offset = (nk_ - 1) * nlpb_;  // Bottom level mask offset
+
+          for (size_t i = 0; i < ssh_2d_size && p < expected_state_dim; ++i) {
+            // Only include points where maskC = 1 (sea points)
+            if (mask_offset + i < maskC.size() &&
+                maskC[mask_offset + i] == 1.0) {
+              background_field_[p] = var_data[i];
+              p++;
+            }
+          }
+
+          // SSH extraction completed
+        } else {
+          // Other variables are 3D fields: apply mask for each level
+          // This corresponds to Fortran: convert_macom_ll_3dr with nk levels
+          for (size_t k = 0; k < nk_ && p < expected_state_dim; ++k) {
+            for (size_t i = 0; i < nlpb_ && p < expected_state_dim; ++i) {
+              size_t data_idx = k * nlpb_ + i;
+              size_t mask_idx = k * nlpb_ + i;
+
+              // Choose appropriate mask based on variable type
+              const auto& mask = (var_name == "u")   ? maskW
+                                 : (var_name == "v") ? maskS
+                                                     : maskC;
+
+              // Only include points where mask = 1 (sea points)
+              if (data_idx < var_data.size() && mask_idx < mask.size() &&
+                  mask[mask_idx] == 1.0) {
+                background_field_[p] = var_data[data_idx];
+                p++;
+              }
+            }
+          }
+
+          // Variable extraction completed
+        }
+      } else {
+        // Special handling for SSH - if not found, create a zero field
+        if (var_name == "ssh") {
+          // Create a zero SSH field with 2D size, but still apply mask
+          size_t ssh_2d_size = nlpb_;              // 2D field size
+          size_t mask_offset = (nk_ - 1) * nlpb_;  // Bottom level mask offset
+
+          for (size_t i = 0; i < ssh_2d_size && p < expected_state_dim; ++i) {
+            // Only include points where maskC = 1 (sea points)
+            if (mask_offset + i < maskC.size() &&
+                maskC[mask_offset + i] == 1.0) {
+              background_field_[p] = 0.0;  // Zero SSH field
+              p++;
+            }
+          }
+
+          // Zero SSH field created
+        } else {
+          // Variable not found, skipping
+        }
+      }
+    }
+
+    // Fill remaining positions with zeros if needed
+    while (p < expected_state_dim) {
+      background_field_[p] = 0.0;
+      p++;
+    }
+
+    // Background field XB extracted successfully
+  }
+
+  /**
+   * @brief Get background field XB
+   * @return Vector containing background field data
+   */
+  const std::vector<double>& getBackgroundField() const {
+    return background_field_;
+  }
+
+  /**
+   * @brief Save background field to file for checking
+   * @param filename Output filename
+   */
+  void saveBackgroundFieldToFile(const std::string& filename) const {
+    std::ofstream file(filename);
+    if (!file.is_open()) {
+      throw std::runtime_error("Could not create background field file: " +
+                               filename);
+    }
+
+    // Match Fortran format exactly: no headers, just values
+    file << std::scientific << std::setprecision(15);
+
+    // Output first 10 rows only (for checking)
+    int max_rows = std::min(10, (int)background_field_.size());
+    for (int p = 0; p < max_rows; ++p) {
+      file << background_field_[p] << "\n";
+    }
+    file.close();
+
+    // Background field saved to file
+  }
 
   // --- Comparison interface (required by framework) ---
 
@@ -370,7 +541,7 @@ class MACOMState {
         framework::CoordinateSystem::GEOGRAPHIC) {
       auto [lat, lon, level] = location.getGeographicCoords();
 
-      // Find nearest grid point
+      // Find nearest grid point (ignore vertical level for now)
       auto nearest_point = geometry_.findNearestGridPoint(lon, lat);
 
       // Access data at the nearest grid point
@@ -480,6 +651,43 @@ class MACOMState {
       const std::vector<double>& query_depths, const std::string& var_name,
       bool use_horizontal_interp = false) const;
 
+  /**
+   * @brief Get values using bilinear interpolation (enhanced version)
+   * @param query_lons Vector of query longitudes
+   * @param query_lats Vector of query latitudes
+   * @param query_depths Vector of query depths
+   * @param var_name Variable name to query
+   * @param use_horizontal_interp Whether to use horizontal interpolation
+   * @return Vector of interpolated values
+   */
+  std::vector<double> getValuesAtNearestPointsBilinear(
+      const std::vector<double>& query_lons,
+      const std::vector<double>& query_lats,
+      const std::vector<double>& query_depths, const std::string& var_name,
+      bool use_horizontal_interp = true) const;
+
+  /**
+   * @brief Get grid type for a specific variable
+   * @param var_name Variable name
+   * @return Grid type (C, W, or S)
+   */
+  std::string getGridTypeForVariable(const std::string& var_name) const;
+
+  /**
+   * @brief Check if a grid point is a valid ocean point
+   * @param grid_idx Grid point index
+   * @param var_name Variable name
+   * @return True if valid ocean point
+   */
+  bool isValidOceanPoint(size_t grid_idx, const std::string& var_name) const;
+
+  /**
+   * @brief Get valid ocean point indices for a variable
+   * @param var_name Variable name
+   * @return Vector of valid ocean point indices
+   */
+  std::vector<size_t> getValidOceanIndices(const std::string& var_name) const;
+
   // --- MACOM mode checking ---
 
   /**
@@ -552,11 +760,12 @@ class MACOMState {
   std::size_t nk_ = 0;    // Number of vertical levels
 
   // Variable data
-  std::vector<double> u;  // u-velocity
-  std::vector<double> v;  // v-velocity
-  std::vector<double> t;  // temperature
-  std::vector<double> s;  // salinity
-  std::vector<double> w;  // w-velocity
+  std::vector<double> u;    // u-velocity
+  std::vector<double> v;    // v-velocity
+  std::vector<double> t;    // temperature
+  std::vector<double> s;    // salinity
+  std::vector<double> w;    // w-velocity
+  std::vector<double> ssh;  // sea surface height
 
   // State information
   std::string inputFile_;      // Input data file path
@@ -571,6 +780,36 @@ class MACOMState {
   std::unordered_map<std::string, std::vector<size_t>> dimensions_;
   std::vector<std::string> variableNames_;  // Available variables
   std::string activeVariable_;              // Currently active variable
+
+  // Background field storage
+  std::vector<double> background_field_;  // Background field XB
+
+  // Private helper methods for interpolation
+  /**
+   * @brief Perform bilinear interpolation for a given location
+   * @param center_idx Center index for interpolation
+   * @param vp Vertical point information
+   * @param var_name Variable name
+   * @param query_lon Query longitude
+   * @param query_lat Query latitude
+   * @param grid_type Grid type
+   * @return Interpolated value
+   */
+  double performBilinearInterpolation(
+      size_t center_idx, const metada::backends::macom::VerticalPoint& vp,
+      const std::string& var_name, double query_lon, double query_lat,
+      const std::string& grid_type) const;
+
+  /**
+   * @brief Perform nearest neighbor interpolation for a given location
+   * @param center_idx Center index for interpolation
+   * @param vp Vertical point information
+   * @param var_name Variable name
+   * @return Interpolated value
+   */
+  double performNearestNeighborInterpolation(
+      size_t center_idx, const metada::backends::macom::VerticalPoint& vp,
+      const std::string& var_name) const;
 
 };  // namespace metada::backends::macom
 
@@ -988,14 +1227,34 @@ void MACOMState<ConfigBackend, GeometryBackend>::loadVariableArrays(
 
   // Read grid data
   for (const auto& variable_name : variables_to_load) {
-    // Ensure vector exists in map and is correctly sized
-    // Using file's global nlpb_ and nk_ for all variables.
-    // A more robust solution would query each NetCDF variable for its specific
-    // dimensions.
-    variables_[variable_name].resize(this->nlpb_ * this->nk_);
+    // Handle SSH differently - it's 2D field, others are 3D
+    if (variable_name == "ssh" || variable_name == "sea_surface_height") {
+      // SSH is 2D field: only use horizontal dimension (nlpb_)
+      variables_[variable_name].resize(this->nlpb_);
+      dimensions_[variable_name] = {this->nlpb_};  // 2D field
+    } else {
+      // Other variables are 3D fields: use full dimensions
+      variables_[variable_name].resize(this->nlpb_ * this->nk_);
+      dimensions_[variable_name] = {this->nlpb_, this->nk_};  // 3D field
+    }
+
     readVarLambda(variable_name, variables_[variable_name]);
-    dimensions_[variable_name] = {
-        this->nlpb_, this->nk_};  // Store dimensions for this variable
+
+    // Also populate the individual variable vectors for backward compatibility
+    if (variable_name == "u") {
+      u = variables_[variable_name];
+    } else if (variable_name == "v") {
+      v = variables_[variable_name];
+    } else if (variable_name == "t") {
+      t = variables_[variable_name];
+    } else if (variable_name == "s") {
+      s = variables_[variable_name];
+    } else if (variable_name == "w") {
+      w = variables_[variable_name];
+    } else if (variable_name == "ssh" ||
+               variable_name == "sea_surface_height") {
+      ssh = variables_[variable_name];
+    }
 
     // // Output sample data: take 10 values from the middle of variable data
     // std::stringstream sample_ss;
@@ -1192,8 +1451,11 @@ MACOMState<ConfigBackend, GeometryBackend>::getValuesAtNearestPoints(
       double interp_val = 0.0;
       bool all_land = true;  // Flag to check if all points are land
       for (size_t j = 0; j < 5; ++j) {
-        size_t lower_index = idxs[j] * this->nk_ + vp.lower_index;
-        size_t upper_index = idxs[j] * this->nk_ + vp.upper_index;
+        // Correct index calculation for data stored as [all_points_layer0,
+        // all_points_layer1, ...]
+        size_t lower_index = idxs[j] + vp.lower_index * this->nlpb_;
+        size_t upper_index = idxs[j] + vp.upper_index * this->nlpb_;
+
         if (lower_index >= var_data.size() || upper_index >= var_data.size()) {
           throw std::out_of_range("Batch: Calculated indices out of bounds.");
         }
@@ -1215,8 +1477,10 @@ MACOMState<ConfigBackend, GeometryBackend>::getValuesAtNearestPoints(
     }
     // Nearest point method (default)
     else {
-      size_t lower_index = center_idx * this->nk_ + vp.lower_index;
-      size_t upper_index = center_idx * this->nk_ + vp.upper_index;
+      // Correct index calculation for data stored as [all_points_layer0,
+      // all_points_layer1, ...]
+      size_t lower_index = center_idx + vp.lower_index * this->nlpb_;
+      size_t upper_index = center_idx + vp.upper_index * this->nlpb_;
       if (lower_index >= var_data.size() || upper_index >= var_data.size()) {
         throw std::out_of_range("Batch: Calculated indices out of bounds.");
       }
@@ -1233,6 +1497,233 @@ MACOMState<ConfigBackend, GeometryBackend>::getValuesAtNearestPoints(
     }
   }
   return result_values;
+}
+
+// Implementation of getValuesAtNearestPointsBilinear
+template <typename ConfigBackend, typename GeometryBackend>
+std::vector<double>
+MACOMState<ConfigBackend, GeometryBackend>::getValuesAtNearestPointsBilinear(
+    const std::vector<double>& query_lons,
+    const std::vector<double>& query_lats,
+    const std::vector<double>& query_depths, const std::string& var_name,
+    bool use_horizontal_interp) const {
+  if (!initialized_) {
+    throw std::runtime_error("MACOMState is not initialized");
+  }
+  if (!geometry_.isInitialized()) {
+    throw std::runtime_error("MACOMGeometry is not initialized");
+  }
+  if (query_lons.size() != query_lats.size() ||
+      query_lons.size() != query_depths.size()) {
+    throw std::invalid_argument(
+        "Longitude, latitude and depth arrays must have the same size");
+  }
+
+  auto var_it = variables_.find(var_name);
+  if (var_it == variables_.end()) {
+    throw std::runtime_error("Variable '" + var_name + "' not found");
+  }
+  [[maybe_unused]] const std::vector<double>& var_data = var_it->second;
+
+  // Get grid type for this variable
+  std::string grid_type = getGridTypeForVariable(var_name);
+
+  // Get nearest points based on grid type
+  std::vector<metada::backends::macom::GeoPoint> nearest_points;
+  if (grid_type == "W") {
+    nearest_points =
+        geometry_.findNearestGridPointsBatchW(query_lons, query_lats);
+  } else if (grid_type == "S") {
+    nearest_points =
+        geometry_.findNearestGridPointsBatchS(query_lons, query_lats);
+  } else {
+    nearest_points =
+        geometry_.findNearestGridPointsBatch(query_lons, query_lats);
+  }
+
+  // Get vertical interpolation points
+  std::vector<metada::backends::macom::VerticalPoint> vertical_points =
+      geometry_.findNearestVerticalPointsBatch(query_depths);
+
+  std::vector<double> result_values(query_lons.size());
+
+  for (size_t i = 0; i < nearest_points.size(); ++i) {
+    size_t center_idx = nearest_points[i].index;
+    const auto& vp = vertical_points[i];
+
+    if (vp.is_outside) {
+      result_values[i] = std::numeric_limits<double>::quiet_NaN();
+      continue;
+    }
+
+    // Check if center point is valid ocean point
+    if (!isValidOceanPoint(center_idx, var_name)) {
+      result_values[i] = -99999.0;  // Land point
+      continue;
+    }
+
+    if (use_horizontal_interp) {
+      result_values[i] = performBilinearInterpolation(
+          center_idx, vp, var_name, query_lons[i], query_lats[i], grid_type);
+    } else {
+      result_values[i] =
+          performNearestNeighborInterpolation(center_idx, vp, var_name);
+    }
+  }
+
+  return result_values;
+}
+
+// Implementation of getGridTypeForVariable
+template <typename ConfigBackend, typename GeometryBackend>
+std::string MACOMState<ConfigBackend, GeometryBackend>::getGridTypeForVariable(
+    const std::string& var_name) const {
+  if (var_name == "u") {
+    return "W";  // U-velocity uses W grid
+  } else if (var_name == "v") {
+    return "S";  // V-velocity uses S grid
+  } else {
+    return "C";  // Temperature, salinity, SSH use C grid
+  }
+}
+
+// Implementation of isValidOceanPoint
+template <typename ConfigBackend, typename GeometryBackend>
+bool MACOMState<ConfigBackend, GeometryBackend>::isValidOceanPoint(
+    size_t grid_idx, const std::string& var_name) const {
+  // Get appropriate mask based on variable type
+  const auto& mask = (var_name == "u")   ? geometry_.getMaskW()
+                     : (var_name == "v") ? geometry_.getMaskS()
+                                         : geometry_.getMaskC();
+
+  return grid_idx < mask.size() && mask[grid_idx] == 1.0;
+}
+
+// Implementation of getValidOceanIndices
+template <typename ConfigBackend, typename GeometryBackend>
+std::vector<size_t>
+MACOMState<ConfigBackend, GeometryBackend>::getValidOceanIndices(
+    const std::string& var_name) const {
+  std::vector<size_t> valid_indices;
+  const auto& mask = (var_name == "u")   ? geometry_.getMaskW()
+                     : (var_name == "v") ? geometry_.getMaskS()
+                                         : geometry_.getMaskC();
+
+  for (size_t i = 0; i < mask.size(); ++i) {
+    if (mask[i] == 1.0) {
+      valid_indices.push_back(i);
+    }
+  }
+
+  return valid_indices;
+}
+
+// Private helper method for bilinear interpolation
+template <typename ConfigBackend, typename GeometryBackend>
+double MACOMState<ConfigBackend, GeometryBackend>::performBilinearInterpolation(
+    size_t center_idx, const metada::backends::macom::VerticalPoint& vp,
+    const std::string& var_name, double query_lon, double query_lat,
+    const std::string& grid_type) const {
+  // Get neighbor indices
+  size_t idx_west = geometry_.getTw()[center_idx];
+  size_t idx_east = geometry_.getTe()[center_idx];
+  size_t idx_north = geometry_.getTn()[center_idx];
+  size_t idx_south = geometry_.getTs()[center_idx];
+
+  // Collect indices
+  std::vector<size_t> idxs = {center_idx, idx_west, idx_east, idx_north,
+                              idx_south};
+
+  // Get coordinates for each neighbor based on grid type
+  std::vector<std::pair<double, double>> corners(5);
+  if (grid_type == "W") {
+    for (size_t j = 0; j < 5; ++j) {
+      corners[j] = {geometry_.getLonW()[idxs[j]], geometry_.getLatW()[idxs[j]]};
+    }
+  } else if (grid_type == "S") {
+    for (size_t j = 0; j < 5; ++j) {
+      corners[j] = {geometry_.getLonS()[idxs[j]], geometry_.getLatS()[idxs[j]]};
+    }
+  } else {
+    for (size_t j = 0; j < 5; ++j) {
+      corners[j] = {geometry_.getLonC()[idxs[j]], geometry_.getLatC()[idxs[j]]};
+    }
+  }
+
+  // Compute distances and weights
+  std::vector<double> weights(5);
+  double total_weight = 0.0;
+
+  for (size_t j = 0; j < 5; ++j) {
+    double dist = metada::backends::macom::MACOMGeometryIterator<
+        ConfigBackend>::haversineDistance(query_lon, query_lat,
+                                          corners[j].first, corners[j].second);
+    weights[j] = 1.0 / (dist * dist);  // Inverse distance squared
+    total_weight += weights[j];
+  }
+
+  // Normalize weights
+  for (auto& w : weights) {
+    w /= total_weight;
+  }
+
+  // Perform vertical interpolation for each neighbor
+  double interp_val = 0.0;
+  bool all_land = true;
+
+  for (size_t j = 0; j < 5; ++j) {
+    // Check if this neighbor is a valid ocean point
+    if (!isValidOceanPoint(idxs[j], var_name)) {
+      continue;  // Skip land points
+    }
+
+    size_t lower_index = idxs[j] * nk_ + vp.lower_index;
+    size_t upper_index = idxs[j] * nk_ + vp.upper_index;
+
+    if (lower_index >= variables_.at(var_name).size() ||
+        upper_index >= variables_.at(var_name).size()) {
+      continue;  // Skip out of bounds
+    }
+
+    double lower_value = variables_.at(var_name)[lower_index];
+    double upper_value = variables_.at(var_name)[upper_index];
+
+    // Check if this is a valid ocean point (non-zero values)
+    if (std::abs(lower_value) > 1e-10 || std::abs(upper_value) > 1e-10) {
+      all_land = false;
+    }
+
+    double v_interp =
+        lower_value + vp.interp_coef * (upper_value - lower_value);
+    interp_val += weights[j] * v_interp;
+  }
+
+  return all_land ? -99999.0 : interp_val;
+}
+
+// Private helper method for nearest neighbor interpolation
+template <typename ConfigBackend, typename GeometryBackend>
+double
+MACOMState<ConfigBackend, GeometryBackend>::performNearestNeighborInterpolation(
+    size_t center_idx, const metada::backends::macom::VerticalPoint& vp,
+    const std::string& var_name) const {
+  size_t lower_index = center_idx * nk_ + vp.lower_index;
+  size_t upper_index = center_idx * nk_ + vp.upper_index;
+
+  if (lower_index >= variables_.at(var_name).size() ||
+      upper_index >= variables_.at(var_name).size()) {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+
+  double lower_value = variables_.at(var_name)[lower_index];
+  double upper_value = variables_.at(var_name)[upper_index];
+
+  // Check if this is a land point
+  if (std::abs(lower_value) < 1e-10 && std::abs(upper_value) < 1e-10) {
+    return -99999.0;  // Land point
+  }
+
+  return lower_value + vp.interp_coef * (upper_value - lower_value);
 }
 
 template <typename ConfigBackend, typename GeometryBackend>
@@ -1401,11 +1892,15 @@ bool MACOMState<ConfigBackend, GeometryBackend>::FortranInitialization() {
       //   fortranInterface_->initializeMitice();
       // }
 
+#if defined(SEAICE_ITD) && SEAICE_ITD
       fortranInterface_->initializeMitice();
+#endif
       fortranInterface_->sendInfoToIO();
       fortranInterface_->openMiscRunInfo();
       fortranInterface_->initCSP();
+#if defined(SEAICE_ITD) && SEAICE_ITD
       fortranInterface_->miticeInitAll();
+#endif
       fortranInterface_->restartAndAssim();
       fortranInterface_->runCspStep();
     } else {
@@ -1417,7 +1912,9 @@ bool MACOMState<ConfigBackend, GeometryBackend>::FortranInitialization() {
       //         std::to_string(fortranInterface_->getRank()));
     }
 
+#if defined(SEAICE_ITD) && SEAICE_ITD
     fortranInterface_->finalizeMitice();
+#endif
 
     initialized_ = true;
     // MACOM_LOG_INFO("MACOMState", "Fortran initialization completed
@@ -1526,7 +2023,7 @@ void MACOMState<ConfigBackend, GeometryBackend>::saveToNetCDF(
 // Simple value modification - now modifies ALL grid points for testing
 template <typename ConfigBackend, typename GeometryBackend>
 void MACOMState<ConfigBackend, GeometryBackend>::modifyValueAtLocation(
-    double lat, double lon, double delta_value) {
+    double lat, double lon, double level, double delta_value) {
   if (!initialized_) {
     throw std::runtime_error("MACOMState not initialized");
   }
@@ -1543,20 +2040,31 @@ void MACOMState<ConfigBackend, GeometryBackend>::modifyValueAtLocation(
   }
 
   auto& data = it->second;
-  size_t modified_count = 0;
 
-  // FOR TESTING: Modify ALL grid points by the delta value
-  for (size_t i = 0; i < data.size(); ++i) {
-    data[i] += delta_value;
-    modified_count++;
+  // Find the nearest horizontal grid point
+  auto nearest_point = geometry_.findNearestGridPoint(lon, lat);
+
+  // Find the nearest vertical layer
+  auto vertical_point = geometry_.findNearestVerticalPoints(level);
+
+  if (vertical_point.is_outside) {
+    throw std::runtime_error("Level " + std::to_string(level) +
+                             " is outside vertical range");
   }
 
-  std::string message =
-      "TESTING MODE: Modified ALL " + std::to_string(modified_count) +
-      " grid points of variable '" + activeVariable_ + "' by " +
-      std::to_string(delta_value) + " (originally requested for location " +
-      std::to_string(lat) + ", " + std::to_string(lon) + ")";
-  std::cout << message << std::endl;
+  // Calculate 3D index: horizontal_index + vertical_index * nlpb_
+  size_t index_3d =
+      nearest_point.index + vertical_point.lower_index * this->nlpb_;
+
+  if (index_3d >= data.size()) {
+    std::cerr << "MODIFY_BOUNDS_ERROR: index_3d=" << index_3d
+              << ", data.size()=" << data.size()
+              << ", activeVariable_=" << activeVariable_ << std::endl;
+    throw std::out_of_range("3D grid point index out of bounds");
+  }
+
+  // Modify the 3D grid point
+  data[index_3d] += delta_value;
 }
 
 }  // namespace metada::backends::macom

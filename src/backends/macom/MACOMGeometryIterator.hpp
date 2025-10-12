@@ -1035,12 +1035,12 @@ VerticalPoint MACOMGeometryIterator<ConfigBackend>::findNearestVerticalPoints(
   result.is_outside = false;
 
   // Check if depth is outside the vertical range
-  if (depth < rC_z.back() || depth > rC_z.front()) {
+  if (depth < 0.0 || depth > rC_z.front()) {
     result.is_outside = true;
     result.lower_index = 0;
     result.upper_index = 0;
     result.interp_coef = 0.0;
-    result.lower_depth = rC_z.back();   // shallowest
+    result.lower_depth = 0.0;           // surface
     result.upper_depth = rC_z.front();  // deepest
     return result;
   }

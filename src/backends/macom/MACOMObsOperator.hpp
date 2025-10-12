@@ -27,6 +27,39 @@ using framework::CoordinateSystem;
 using framework::Location;
 using framework::ObservationPoint;
 
+// Forward declarations
+template <typename StateBackend, typename ObsBackend>
+class MACOMObsOperator;
+
+/**
+ * @brief Get variable name for observation type
+ * @param obs_type Observation type (1=T, 2=S, 3=U, 4=V, 5=SSH, 11=SST,
+ * 55=SSH_mean, 99=PBT)
+ * @return Variable name
+ */
+inline std::string getVariableNameForObsType(int obs_type) {
+  switch (obs_type) {
+    case 1:
+      return "t";  // Temperature
+    case 2:
+      return "s";  // Salinity
+    case 3:
+      return "u";  // U-velocity
+    case 4:
+      return "v";  // V-velocity
+    case 5:
+      return "ssh";  // Sea surface height
+    case 11:
+      return "sst";  // Sea surface temperature
+    case 55:
+      return "ssh";  // Sea surface height mean
+    case 99:
+      return "pbt";  // Bottom pressure
+    default:
+      return "t";  // Default to temperature
+  }
+}
+
 /**
  * @brief MACOM observation operator backend implementation
  *
@@ -78,31 +111,8 @@ class MACOMObsOperator {
   template <typename ConfigBackend>
   explicit MACOMObsOperator(const ConfigBackend& config)
       : interpolation_method_("nearest_neighbor") {
-    // Read configuration parameters
-    try {
-      // Optionally read interpolation method
-      if (config.HasKey("interpolation_method")) {
-        interpolation_method_ = config.Get("interpolation_method").asString();
-      }
-
-      // Read required variables
-      const auto& variables_configs = config.Get("variables").asVectorMap();
-      for (const auto& var_map : variables_configs) {
-        for (const auto& [var_name, var_config] : var_map) {
-          const auto& var_backend = ConfigBackend(var_config.asMap());
-          bool var_if_use = var_backend.Get("if_use").asBool();
-          if (var_if_use) {
-            required_state_vars_.push_back(var_name);
-            required_obs_vars_.push_back(var_name);
-          }
-        }
-      }
-
-      initialized_ = true;
-    } catch (const std::exception& e) {
-      throw std::runtime_error("Failed to initialize MACOMObsOperator: " +
-                               std::string(e.what()));
-    }
+    // Use common initialization logic (variables required in constructor)
+    initializeFromConfig(config, true);
   }
 
   /**
@@ -143,32 +153,8 @@ class MACOMObsOperator {
    */
   template <typename ConfigBackend>
   void initialize(const ConfigBackend& config) {
-    try {
-      // Optionally read interpolation method
-      if (config.HasKey("interpolation_method")) {
-        interpolation_method_ = config.Get("interpolation_method").asString();
-      }
-
-      // Read required variables
-      if (config.HasKey("variables")) {
-        const auto& variables_configs = config.Get("variables").asVectorMap();
-        for (const auto& var_map : variables_configs) {
-          for (const auto& [var_name, var_config] : var_map) {
-            const auto& var_backend = ConfigBackend(var_config.asMap());
-            bool var_if_use = var_backend.Get("if_use").asBool();
-            if (var_if_use) {
-              required_state_vars_.push_back(var_name);
-              required_obs_vars_.push_back(var_name);
-            }
-          }
-        }
-      }
-
-      initialized_ = true;
-    } catch (const std::exception& e) {
-      throw std::runtime_error("Failed to initialize MACOMObsOperator: " +
-                               std::string(e.what()));
-    }
+    // Use common initialization logic (variables optional in initialize method)
+    initializeFromConfig(config, false);
   }
 
   /**
@@ -186,8 +172,7 @@ class MACOMObsOperator {
    * @brief Apply observation operator: H(x) -> y_obs (required by framework)
    *
    * Maps state variables to observation space using MACOM's unstructured grid.
-   * This uses the existing getValuesAtNearestPoints method for efficient
-   * spatial interpolation.
+   * This implements functionality similar to Fortran's GET_IY subroutine.
    *
    * @param state Model state on MACOM grid
    * @param obs Observations with geographic locations
@@ -202,46 +187,46 @@ class MACOMObsOperator {
     std::vector<double> result;
     result.reserve(obs.size());
 
-    // Prepare observation coordinates for batch processing
-    std::vector<double> obs_lats, obs_lons, obs_levels;
-    obs_lats.reserve(obs.size());
-    obs_lons.reserve(obs.size());
-    obs_levels.reserve(obs.size());
-
-    for (const auto& obs_point : obs) {
-      if (!obs_point.is_valid) {
-        obs_lats.push_back(0.0);  // Dummy values for invalid observations
-        obs_lons.push_back(0.0);
-        obs_levels.push_back(0.0);
-      } else if (obs_point.location.getCoordinateSystem() ==
-                 CoordinateSystem::GEOGRAPHIC) {
-        auto [lat, lon, level] = obs_point.location.getGeographicCoords();
-        obs_lats.push_back(lat);
-        obs_lons.push_back(lon);
-        obs_levels.push_back(level);
-      } else {
-        throw std::runtime_error(
-            "MACOMObsOperator only supports geographic coordinates for "
-            "observations");
-      }
-    }
-
-    // Use the existing getValuesAtNearestPoints method for efficient batch
-    // processing Use active variable and enable horizontal interpolation for
-    // better accuracy
-    std::string active_var = state.getActiveVariable();
-    auto interpolated_values = state.getValuesAtNearestPoints(
-        obs_lons, obs_lats, obs_levels, active_var, false);
-
-    // Process results and handle invalid observations
-    size_t obs_idx = 0;
+    // Process each observation point
     for (const auto& obs_point : obs) {
       if (!obs_point.is_valid) {
         result.push_back(0.0);  // Invalid observations get zero
-      } else {
-        result.push_back(interpolated_values[obs_idx]);
+        continue;
       }
-      obs_idx++;
+
+      // Extract observation information
+      auto [lat, lon, level] = obs_point.location.getGeographicCoords();
+      [[maybe_unused]] double obs_time = obs_point.time;
+      int obs_type = obs_point.obs_type;
+
+      // Determine variable name based on observation type (similar to Fortran
+      // GET_IY)
+      std::string var_name = getVariableNameForObsType(obs_type);
+
+      // Use MACOMState's interpolation method (similar to Fortran's spatial
+      // interpolation)
+      try {
+        std::vector<double> query_lons = {lon};
+        std::vector<double> query_lats = {lat};
+        std::vector<double> query_depths = {level};
+
+        // Option 1: Nearest neighbor interpolation (default)
+        auto interpolated_values = state.getValuesAtNearestPoints(
+            query_lons, query_lats, query_depths, var_name, true);
+
+        // Option 2: Bilinear interpolation (commented out)
+        // auto interpolated_values = state.getValuesAtNearestPointsBilinear(
+        //     query_lons, query_lats, query_depths, var_name, true);
+
+        if (!interpolated_values.empty()) {
+          result.push_back(interpolated_values[0]);
+        } else {
+          result.push_back(0.0);  // Fallback for failed interpolation
+        }
+      } catch (const std::exception& e) {
+        // If interpolation fails, return 0.0
+        result.push_back(0.0);
+      }
     }
 
     return result;
@@ -275,17 +260,19 @@ class MACOMObsOperator {
     // Simple adjoint implementation: distribute observation increments back to
     // grid This is a placeholder - should be implemented based on the actual
     // adjoint
-    for (size_t i = 0; i < obs_increment.size() && i < obs.size(); ++i) {
-      const auto& obs_point = obs[i];
-      if (obs_point.is_valid) {
+    size_t obs_idx = 0;
+    for (const auto& obs_point : obs) {
+      if (obs_idx < obs_increment.size() && obs_point.is_valid) {
         // For now, just add the increment to the nearest grid point
         // This should be replaced with proper adjoint interpolation
         if (obs_point.location.getCoordinateSystem() ==
             CoordinateSystem::GEOGRAPHIC) {
           auto [lat, lon, level] = obs_point.location.getGeographicCoords();
-          increment_state.modifyValueAtLocation(lat, lon, obs_increment[i]);
+          increment_state.modifyValueAtLocation(lat, lon, level,
+                                                obs_increment[obs_idx]);
         }
       }
+      obs_idx++;
     }
   }
 
@@ -377,6 +364,42 @@ class MACOMObsOperator {
         required_state_vars_(other.required_state_vars_),
         required_obs_vars_(other.required_obs_vars_),
         initialized_(other.initialized_) {}
+
+  /**
+   * @brief Common initialization logic
+   * @param config Configuration backend instance
+   * @param require_variables Whether variables section is required
+   */
+  template <typename ConfigBackend>
+  void initializeFromConfig(const ConfigBackend& config,
+                            bool require_variables = true) {
+    try {
+      // Optionally read interpolation method
+      if (config.HasKey("interpolation_method")) {
+        interpolation_method_ = config.Get("interpolation_method").asString();
+      }
+
+      // Read required variables
+      if (require_variables || config.HasKey("variables")) {
+        const auto& variables_configs = config.Get("variables").asVectorMap();
+        for (const auto& var_map : variables_configs) {
+          for (const auto& [var_name, var_config] : var_map) {
+            const auto& var_backend = ConfigBackend(var_config.asMap());
+            bool var_if_use = var_backend.Get("if_use").asBool();
+            if (var_if_use) {
+              required_state_vars_.push_back(var_name);
+              required_obs_vars_.push_back(var_name);
+            }
+          }
+        }
+      }
+
+      initialized_ = true;
+    } catch (const std::exception& e) {
+      throw std::runtime_error("Failed to initialize MACOMObsOperator: " +
+                               std::string(e.what()));
+    }
+  }
 
   std::string interpolation_method_;              ///< Interpolation method
   std::vector<std::string> required_state_vars_;  ///< Required state variables

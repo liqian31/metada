@@ -1,0 +1,21 @@
+# Circle observation test data for MACOM
+# Format: lat lon level value error
+# This file contains observations arranged in a circle for testing ETKF assimilation
+# Center: (26.6, 124.4), Radius: 0.3 degrees, 16 points around the circle
+# Temperature values decrease from center outward (realistic ocean temperature pattern)
+26.60 124.40 5.0 21.5 0.4
+26.75 124.40 5.0 21.2 0.4
+26.85 124.25 5.0 21.0 0.4
+26.85 124.55 5.0 21.0 0.4
+26.75 124.70 5.0 20.8 0.4
+26.60 124.70 5.0 20.6 0.4
+26.45 124.70 5.0 20.4 0.4
+26.35 124.55 5.0 20.2 0.4
+26.35 124.25 5.0 20.0 0.4
+26.45 124.10 5.0 19.8 0.4
+26.60 124.10 5.0 19.6 0.4
+26.75 124.10 5.0 19.4 0.4
+26.85 124.25 5.0 19.2 0.4
+26.85 124.55 5.0 19.0 0.4
+26.75 124.70 5.0 18.8 0.4
+26.60 124.70 5.0 18.6 0.4
